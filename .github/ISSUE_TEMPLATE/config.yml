@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: General Questions
+    url: https://github.com/orchestra-mcp/orchestra/discussions
+    about: Ask questions about Orchestra in the main repo discussions
