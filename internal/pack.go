@@ -137,6 +137,9 @@ func runPackInstall(args []string) {
 	if len(manifest.Contents.Hooks) > 0 {
 		fmt.Fprintf(os.Stderr, "  Hooks: %s\n", strings.Join(manifest.Contents.Hooks, ", "))
 	}
+
+	// Regenerate workspace docs to reflect new content.
+	GenerateWorkspaceDocs(absWorkspace)
 }
 
 // --- remove ---
@@ -164,6 +167,9 @@ func runPackRemove(args []string) {
 	savePackRegistry(absWorkspace, reg)
 
 	fmt.Fprintf(os.Stderr, "Removed pack: %s\n", name)
+
+	// Regenerate workspace docs to reflect removed content.
+	GenerateWorkspaceDocs(absWorkspace)
 }
 
 // --- update ---
@@ -220,6 +226,9 @@ func runPackUpdate(args []string) {
 	}
 
 	savePackRegistry(absWorkspace, reg)
+
+	// Regenerate workspace docs to reflect updated packs.
+	GenerateWorkspaceDocs(absWorkspace)
 }
 
 // --- list ---

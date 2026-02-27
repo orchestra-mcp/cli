@@ -90,6 +90,14 @@ func RunInit(args []string) {
 		fmt.Fprintf(os.Stderr, "\n  [OK] .projects/ directory ready\n")
 	}
 
+	// Install bundled skill + agent (project-manager, orchestra).
+	fmt.Fprintf(os.Stderr, "\n")
+	InstallBundledContent(absWorkspace)
+
+	// Generate CLAUDE.md and AGENTS.md from installed content.
+	fmt.Fprintf(os.Stderr, "\n")
+	GenerateWorkspaceDocs(absWorkspace)
+
 	// Detect technology stacks and recommend packs.
 	stacks := detectStacks(absWorkspace)
 	if len(stacks) > 0 {
