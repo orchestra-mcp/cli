@@ -90,6 +90,17 @@ func RunInit(args []string) {
 		fmt.Fprintf(os.Stderr, "\n  [OK] .projects/ directory ready\n")
 	}
 
+	// Detect technology stacks and recommend packs.
+	stacks := detectStacks(absWorkspace)
+	if len(stacks) > 0 {
+		var stackNames []string
+		for _, s := range stacks {
+			stackNames = append(stackNames, s.name)
+		}
+		fmt.Fprintf(os.Stderr, "\n  Detected stacks: %s\n", strings.Join(stackNames, ", "))
+		fmt.Fprintf(os.Stderr, "  Run 'orchestra pack recommend' to see recommended packs\n")
+	}
+
 	fmt.Fprintf(os.Stderr, "\nDone! Orchestra MCP is ready.\n")
 }
 

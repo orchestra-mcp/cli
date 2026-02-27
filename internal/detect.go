@@ -8,6 +8,111 @@ import (
 	"strings"
 )
 
+// stackInfo describes a detected technology stack.
+type stackInfo struct {
+	name     string
+	evidence string
+}
+
+// detectStacks detects technology stacks in the given workspace.
+func detectStacks(root string) []stackInfo {
+	var stacks []stackInfo
+
+	type check struct {
+		name  string
+		check func(string) (bool, string)
+	}
+
+	checks := []check{
+		{"go", checkAnyFile("go.mod", "go.work")},
+		{"rust", checkFile("Cargo.toml")},
+		{"react", checkPkgJSONDep("react")},
+		{"typescript", checkFile("tsconfig.json")},
+		{"python", checkAnyFile("pyproject.toml", "requirements.txt", "setup.py")},
+		{"ruby", checkFile("Gemfile")},
+		{"java", checkAnyFile("pom.xml", "build.gradle")},
+		{"kotlin", checkFile("build.gradle.kts")},
+		{"swift", checkSwiftStack},
+		{"csharp", checkCSharpStack},
+		{"php", checkFile("composer.json")},
+		{"docker", checkAnyFile("Dockerfile", "docker-compose.yml", "docker-compose.yaml")},
+	}
+
+	for _, c := range checks {
+		if ok, evidence := c.check(root); ok {
+			stacks = append(stacks, stackInfo{name: c.name, evidence: evidence})
+		}
+	}
+
+	return stacks
+}
+
+func checkFile(name string) func(string) (bool, string) {
+	return func(root string) (bool, string) {
+		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+			return true, name + " found"
+		}
+		return false, ""
+	}
+}
+
+func checkAnyFile(names ...string) func(string) (bool, string) {
+	return func(root string) (bool, string) {
+		for _, name := range names {
+			if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+				return true, name + " found"
+			}
+		}
+		return false, ""
+	}
+}
+
+func checkPkgJSONDep(dep string) func(string) (bool, string) {
+	return func(root string) (bool, string) {
+		data, err := os.ReadFile(filepath.Join(root, "package.json"))
+		if err != nil {
+			return false, ""
+		}
+		var pkg struct {
+			Dependencies    map[string]string `json:"dependencies"`
+			DevDependencies map[string]string `json:"devDependencies"`
+		}
+		if json.Unmarshal(data, &pkg) != nil {
+			return false, ""
+		}
+		if _, ok := pkg.Dependencies[dep]; ok {
+			return true, dep + " in dependencies"
+		}
+		if _, ok := pkg.DevDependencies[dep]; ok {
+			return true, dep + " in devDependencies"
+		}
+		return false, ""
+	}
+}
+
+func checkSwiftStack(root string) (bool, string) {
+	if _, err := os.Stat(filepath.Join(root, "Package.swift")); err == nil {
+		return true, "Package.swift found"
+	}
+	matches, _ := filepath.Glob(filepath.Join(root, "*.xcodeproj"))
+	if len(matches) > 0 {
+		return true, ".xcodeproj found"
+	}
+	return false, ""
+}
+
+func checkCSharpStack(root string) (bool, string) {
+	matches, _ := filepath.Glob(filepath.Join(root, "*.csproj"))
+	if len(matches) > 0 {
+		return true, ".csproj found"
+	}
+	matches, _ = filepath.Glob(filepath.Join(root, "*.sln"))
+	if len(matches) > 0 {
+		return true, ".sln found"
+	}
+	return false, ""
+}
+
 // detectProjectName tries to determine the project name from common config files.
 func detectProjectName(root string) string {
 	// 1. package.json

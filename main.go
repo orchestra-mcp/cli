@@ -23,6 +23,8 @@ func main() {
 		internal.RunInstall(os.Args[2:])
 	case "plugins":
 		internal.RunPlugins(os.Args[2:])
+	case "pack":
+		internal.RunPack(os.Args[2:])
 	case "uninstall", "remove":
 		internal.RunUninstall(os.Args[2:])
 	case "update", "upgrade":
@@ -44,6 +46,7 @@ Usage:
   orchestra serve        Start the MCP stdio server (default)
   orchestra init         Initialize MCP configs for your IDE(s)
   orchestra install      Install a plugin from a GitHub repo
+  orchestra pack         Manage content packs (skills, agents, hooks)
   orchestra plugins      List installed plugins
   orchestra uninstall    Remove an installed plugin
   orchestra update       Update an installed plugin to latest

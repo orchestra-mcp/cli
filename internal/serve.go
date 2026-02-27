@@ -63,10 +63,11 @@ func RunServe(args []string) {
 	binDir := filepath.Dir(selfPath)
 
 	bins := map[string]string{
-		"orchestrator":     filepath.Join(binDir, "orchestrator"),
-		"storage-markdown": filepath.Join(binDir, "storage-markdown"),
-		"tools-features":   filepath.Join(binDir, "tools-features"),
-		"transport-stdio":  filepath.Join(binDir, "transport-stdio"),
+		"orchestrator":       filepath.Join(binDir, "orchestrator"),
+		"storage-markdown":   filepath.Join(binDir, "storage-markdown"),
+		"tools-features":     filepath.Join(binDir, "tools-features"),
+		"tools-marketplace":  filepath.Join(binDir, "tools-marketplace"),
+		"transport-stdio":    filepath.Join(binDir, "transport-stdio"),
 	}
 	for name, path := range bins {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -96,6 +97,12 @@ func RunServe(args []string) {
 				ID:      "tools.features",
 				Binary:  bins["tools-features"],
 				Enabled: true,
+			},
+			{
+				ID:      "tools.marketplace",
+				Binary:  bins["tools-marketplace"],
+				Enabled: true,
+				Args:    []string{fmt.Sprintf("--workspace=%s", absWorkspace)},
 			},
 		},
 	}
@@ -183,7 +190,7 @@ func RunServe(args []string) {
 		logStr := string(logData)
 
 		booted := strings.Count(logStr, "registered and booted")
-		if booted >= 2 {
+		if booted >= 3 {
 			ready = true
 			break
 		}
