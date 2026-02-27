@@ -49,7 +49,8 @@ Usage:
   orchestra pack         Manage content packs (skills, agents, hooks)
   orchestra plugins      List installed plugins
   orchestra uninstall    Remove an installed plugin
-  orchestra update       Update an installed plugin to latest
+  orchestra update       Update Orchestra to latest version
+  orchestra update <id>  Update an installed plugin to latest
   orchestra version      Print version info
   orchestra help         Show this help
 
@@ -74,6 +75,7 @@ Examples:
   orchestra install github.com/someone/my-plugin --source
   orchestra install github.com/orchestra-mcp/sdk-go --dev
   orchestra uninstall my-plugin
+  orchestra update
   orchestra update my-plugin
 `)
 }

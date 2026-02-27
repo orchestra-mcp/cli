@@ -89,10 +89,12 @@ func RunUninstall(args []string) {
 	fmt.Fprintf(os.Stderr, "Uninstalled %s (%s)\n", entry.ID, entry.Repo)
 }
 
-// RunUpdate handles `orchestra update <plugin-id-or-repo>`.
+// RunUpdate handles `orchestra update` (self-update) or `orchestra update <plugin>`.
 func RunUpdate(args []string) {
 	if len(args) < 1 {
-		fatal("usage: orchestra update <plugin-id-or-repo>")
+		// No args = self-update Orchestra.
+		runSelfUpdate()
+		return
 	}
 	target := args[0]
 

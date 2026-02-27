@@ -110,6 +110,9 @@ func RunInit(args []string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "\nDone! Orchestra MCP is ready.\n")
+
+	// Check for newer version (non-blocking advisory).
+	CheckAndPromptUpdate()
 }
 
 func resolveBinaryPath() (string, error) {
