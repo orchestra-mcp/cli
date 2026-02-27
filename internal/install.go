@@ -29,20 +29,27 @@ func RunInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	forceSource := fs.Bool("source", false, "Force build from source (skip binary download)")
 	forceBinary := fs.Bool("binary", false, "Force binary download (fail if unavailable)")
+	devMode := fs.Bool("dev", false, "Clone full repo into libs/ for development")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fatal("usage: orchestra install <repo> [--source] [--binary]\n  Example: orchestra install github.com/someone/my-plugin@v1.2.0")
+		fatal("usage: orchestra install <repo> [--source] [--binary] [--dev]\n  Example: orchestra install github.com/orchestra-mcp/sdk-go\n  Dev:     orchestra install github.com/orchestra-mcp/sdk-go --dev")
 	}
 
 	// Parse repo and optional version tag.
 	rawArg := fs.Arg(0)
 	repo, version := parseRepoVersion(rawArg)
 
-	// Derive binary name from last path segment.
+	// Derive name from last path segment.
 	name := filepath.Base(repo)
 	if name == "" || name == "." {
 		fatal("invalid repo path: %s", repo)
+	}
+
+	// Dev mode: clone full repo into libs/ directory.
+	if *devMode {
+		runDevInstall(repo, version, name)
+		return
 	}
 
 	binDir := pluginBinDir()
@@ -124,6 +131,63 @@ func RunInstall(args []string) {
 	}
 	if len(manifest.ProvidesStorage) > 0 {
 		fmt.Fprintf(os.Stderr, "  Storage: %s\n", strings.Join(manifest.ProvidesStorage, ", "))
+	}
+}
+
+// runDevInstall clones a full git repo into the libs/ directory for local
+// development. The repo is cloned with full history so you can commit/push
+// directly from libs/<name>/.
+func runDevInstall(repo, version, name string) {
+	// Find libs/ directory relative to current working directory.
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatal("get working directory: %v", err)
+	}
+	libsDir := filepath.Join(cwd, "libs")
+
+	// Ensure libs/ exists.
+	if err := os.MkdirAll(libsDir, 0755); err != nil {
+		fatal("create libs dir: %v", err)
+	}
+
+	destDir := filepath.Join(libsDir, name)
+
+	// Check if already cloned.
+	if _, err := os.Stat(destDir); err == nil {
+		fmt.Fprintf(os.Stderr, "  %s already exists at libs/%s\n", name, name)
+		fmt.Fprintf(os.Stderr, "  Pulling latest...\n")
+		pullCmd := exec.Command("git", "pull")
+		pullCmd.Dir = destDir
+		pullCmd.Stdout = os.Stderr
+		pullCmd.Stderr = os.Stderr
+		if err := pullCmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: git pull failed: %v\n", err)
+		}
+		fmt.Fprintf(os.Stderr, "  Updated libs/%s\n", name)
+		return
+	}
+
+	// Clone the repo.
+	cloneURL := "https://" + repo + ".git"
+	cloneArgs := []string{"clone"}
+	if version != "" {
+		cloneArgs = append(cloneArgs, "--branch", version)
+	}
+	cloneArgs = append(cloneArgs, cloneURL, destDir)
+
+	fmt.Fprintf(os.Stderr, "Cloning %s into libs/%s...\n", repo, name)
+	gitCmd := exec.Command("git", cloneArgs...)
+	gitCmd.Stdout = os.Stderr
+	gitCmd.Stderr = os.Stderr
+	if err := gitCmd.Run(); err != nil {
+		fatal("git clone: %v", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "\nInstalled libs/%s (dev mode)\n", name)
+	fmt.Fprintf(os.Stderr, "  Path: %s\n", destDir)
+	fmt.Fprintf(os.Stderr, "  Repo: %s\n", repo)
+	if version != "" {
+		fmt.Fprintf(os.Stderr, "  Branch/Tag: %s\n", version)
 	}
 }
 

@@ -63,11 +63,13 @@ Init flags:
 Install flags:
   --source          Force build from source (skip binary download)
   --binary          Force binary download (fail if unavailable)
+  --dev             Clone full repo into libs/ for development
 
 Examples:
   orchestra install github.com/someone/my-plugin
   orchestra install github.com/someone/my-plugin@v1.2.0
   orchestra install github.com/someone/my-plugin --source
+  orchestra install github.com/orchestra-mcp/sdk-go --dev
   orchestra uninstall my-plugin
   orchestra update my-plugin
 `)
