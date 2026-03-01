@@ -120,6 +120,7 @@ func RunServe(args []string) {
 		"tools-agentops":        filepath.Join(binDir, "tools-agentops"),
 		"tools-sessions":        filepath.Join(binDir, "tools-sessions"),
 		"agent-orchestrator":    filepath.Join(binDir, "agent-orchestrator"),
+		"tools-workspace":       filepath.Join(binDir, "tools-workspace"),
 		"transport-quic-bridge": filepath.Join(binDir, "transport-quic-bridge"),
 	}
 	available := map[string]bool{}
@@ -252,6 +253,14 @@ func RunServe(args []string) {
 		cfg.Plugins = append(cfg.Plugins, pluginConfig{
 			ID:      "agent.orchestrator",
 			Binary:  bins["agent-orchestrator"],
+			Enabled: true,
+		})
+	}
+
+	if available["tools-workspace"] {
+		cfg.Plugins = append(cfg.Plugins, pluginConfig{
+			ID:      "tools.workspace",
+			Binary:  bins["tools-workspace"],
 			Enabled: true,
 		})
 	}
