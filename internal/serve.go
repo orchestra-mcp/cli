@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +29,44 @@ type orchestratorConfig struct {
 	ListenAddr string         `yaml:"listen_addr"`
 	CertsDir   string         `yaml:"certs_dir"`
 	Plugins    []pluginConfig `yaml:"plugins"`
+}
+
+// lockFile path — stores "pid:addr" of the running orchestrator process.
+func orchLockFile(workspace string) string {
+	return filepath.Join(workspace, ".orchestra-mcp.lock")
+}
+
+// readLock returns the orchestrator pid and listen addr if a live lock exists.
+func readLock(workspace string) (pid int, addr string, ok bool) {
+	data, err := os.ReadFile(orchLockFile(workspace))
+	if err != nil {
+		return 0, "", false
+	}
+	parts := strings.SplitN(strings.TrimSpace(string(data)), ":", 2)
+	if len(parts) != 2 {
+		return 0, "", false
+	}
+	p, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, "", false
+	}
+	// Check the process is alive.
+	proc, err := os.FindProcess(p)
+	if err != nil {
+		return 0, "", false
+	}
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return 0, "", false
+	}
+	return p, parts[1], true
+}
+
+func writeLock(workspace string, pid int, addr string) {
+	os.WriteFile(orchLockFile(workspace), fmt.Appendf(nil, "%d:%s", pid, addr), 0644)
+}
+
+func removeLock(workspace string) {
+	os.Remove(orchLockFile(workspace))
 }
 
 func RunServe(args []string) {
@@ -63,23 +102,60 @@ func RunServe(args []string) {
 	binDir := filepath.Dir(selfPath)
 
 	bins := map[string]string{
-		"orchestrator":       filepath.Join(binDir, "orchestrator"),
-		"storage-markdown":   filepath.Join(binDir, "storage-markdown"),
-		"tools-features":     filepath.Join(binDir, "tools-features"),
-		"tools-marketplace":  filepath.Join(binDir, "tools-marketplace"),
-		"transport-stdio":    filepath.Join(binDir, "transport-stdio"),
+		"orchestrator":      filepath.Join(binDir, "orchestrator"),
+		"storage-markdown":  filepath.Join(binDir, "storage-markdown"),
+		"tools-features":    filepath.Join(binDir, "tools-features"),
+		"tools-marketplace": filepath.Join(binDir, "tools-marketplace"),
+		"transport-stdio":   filepath.Join(binDir, "transport-stdio"),
 	}
+
+	// Optional binaries — don't fail if missing.
+	optionalBins := map[string]string{
+		"engine-rag":            filepath.Join(binDir, "engine-rag"),
+		"bridge-claude":         filepath.Join(binDir, "bridge-claude"),
+		"bridge-openai":         filepath.Join(binDir, "bridge-openai"),
+		"bridge-gemini":         filepath.Join(binDir, "bridge-gemini"),
+		"bridge-ollama":         filepath.Join(binDir, "bridge-ollama"),
+		"bridge-firecrawl":      filepath.Join(binDir, "bridge-firecrawl"),
+		"tools-agentops":        filepath.Join(binDir, "tools-agentops"),
+		"tools-sessions":        filepath.Join(binDir, "tools-sessions"),
+		"agent-orchestrator":    filepath.Join(binDir, "agent-orchestrator"),
+		"transport-quic-bridge": filepath.Join(binDir, "transport-quic-bridge"),
+	}
+	available := map[string]bool{}
+	for name, path := range optionalBins {
+		if _, err := os.Stat(path); err == nil {
+			available[name] = true
+			bins[name] = path
+		}
+	}
+
 	for name, path := range bins {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			fatal("missing binary %q at %s", name, path)
 		}
 	}
 
-	// Kill stale processes.
-	for _, bin := range bins {
-		exec.Command("pkill", "-9", "-f", bin).Run()
+	// ----------------------------------------------------------------
+	// Multi-session support: if a live orchestrator is already running
+	// for this workspace, skip launching a new one and just attach a
+	// new transport-stdio to it. Each Claude Code window gets its own
+	// transport-stdio process — only one orchestrator and plugin set
+	// runs at a time.
+	// ----------------------------------------------------------------
+	if _, orchAddr, ok := readLock(absWorkspace); ok {
+		runTransportOnly(bins["transport-stdio"], orchAddr, absCertsDir, logFile)
+		return
 	}
-	time.Sleep(500 * time.Millisecond)
+
+	// No live orchestrator — we are the primary serve process.
+	// Open log file (truncate for a fresh start).
+	os.WriteFile(logFile, nil, 0644)
+	lf, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		fatal("open log: %v", err)
+	}
+	defer lf.Close()
 
 	// Write temp config.
 	cfg := orchestratorConfig{
@@ -107,13 +183,85 @@ func RunServe(args []string) {
 		},
 	}
 
+	if available["engine-rag"] {
+		cfg.Plugins = append(cfg.Plugins, pluginConfig{
+			ID:      "engine.rag",
+			Binary:  bins["engine-rag"],
+			Enabled: true,
+			Args:    []string{fmt.Sprintf("--workspace=%s", absWorkspace)},
+		})
+	}
+
+	if available["bridge-claude"] {
+		cfg.Plugins = append(cfg.Plugins, pluginConfig{
+			ID:      "bridge.claude",
+			Binary:  bins["bridge-claude"],
+			Enabled: true,
+		})
+	}
+
+	if available["bridge-openai"] {
+		cfg.Plugins = append(cfg.Plugins, pluginConfig{
+			ID:      "bridge.openai",
+			Binary:  bins["bridge-openai"],
+			Enabled: true,
+		})
+	}
+
+	if available["bridge-gemini"] {
+		cfg.Plugins = append(cfg.Plugins, pluginConfig{
+			ID:      "bridge.gemini",
+			Binary:  bins["bridge-gemini"],
+			Enabled: true,
+		})
+	}
+
+	if available["bridge-ollama"] {
+		cfg.Plugins = append(cfg.Plugins, pluginConfig{
+			ID:      "bridge.ollama",
+			Binary:  bins["bridge-ollama"],
+			Enabled: true,
+		})
+	}
+
+	if available["bridge-firecrawl"] {
+		cfg.Plugins = append(cfg.Plugins, pluginConfig{
+			ID:      "bridge.firecrawl",
+			Binary:  bins["bridge-firecrawl"],
+			Enabled: true,
+		})
+	}
+
+	if available["tools-agentops"] {
+		cfg.Plugins = append(cfg.Plugins, pluginConfig{
+			ID:      "tools.agentops",
+			Binary:  bins["tools-agentops"],
+			Enabled: true,
+		})
+	}
+
+	if available["tools-sessions"] {
+		cfg.Plugins = append(cfg.Plugins, pluginConfig{
+			ID:      "tools.sessions",
+			Binary:  bins["tools-sessions"],
+			Enabled: true,
+		})
+	}
+
+	if available["agent-orchestrator"] {
+		cfg.Plugins = append(cfg.Plugins, pluginConfig{
+			ID:      "agent.orchestrator",
+			Binary:  bins["agent-orchestrator"],
+			Enabled: true,
+		})
+	}
+
 	// Load third-party plugins from registry.
 	registry, err := LoadRegistry()
 	if err == nil && registry != nil {
 		for _, p := range registry.Plugins {
-			// Verify binary still exists.
 			if _, err := os.Stat(p.Binary); err != nil {
-				continue // skip missing binaries
+				continue
 			}
 			cfg.Plugins = append(cfg.Plugins, pluginConfig{
 				ID:              p.ID,
@@ -130,19 +278,20 @@ func RunServe(args []string) {
 		fatal("create temp config: %v", err)
 	}
 	tmpConfig := tmpFile.Name()
-
 	data, _ := yaml.Marshal(&cfg)
 	tmpFile.Write(data)
 	tmpFile.Close()
 
-	// Truncate log.
-	os.WriteFile(logFile, nil, 0644)
-
 	// Setup signal handling and cleanup.
 	var orchCmd *exec.Cmd
+	var quicBridgeCmd *exec.Cmd
+
 	cleanup := func() {
+		removeLock(absWorkspace)
+		if quicBridgeCmd != nil && quicBridgeCmd.Process != nil {
+			quicBridgeCmd.Process.Kill()
+		}
 		if orchCmd != nil && orchCmd.Process != nil {
-			// Kill children first, then orchestrator.
 			exec.Command("pkill", "-P", fmt.Sprintf("%d", orchCmd.Process.Pid)).Run()
 			orchCmd.Process.Signal(syscall.SIGTERM)
 			time.Sleep(300 * time.Millisecond)
@@ -162,12 +311,6 @@ func RunServe(args []string) {
 	defer cleanup()
 
 	// Start orchestrator.
-	lf, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		fatal("open log: %v", err)
-	}
-	defer lf.Close()
-
 	orchCmd = exec.Command(bins["orchestrator"], "--config", tmpConfig)
 	orchCmd.Stdout = lf
 	orchCmd.Stderr = lf
@@ -175,14 +318,10 @@ func RunServe(args []string) {
 		fatal("start orchestrator: %v", err)
 	}
 
-	// Write PID file.
-	pidFile := filepath.Join(absWorkspace, ".orchestra-mcp.pid")
-	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", orchCmd.Process.Pid)), 0644)
-	defer os.Remove(pidFile)
-
-	// Wait for plugins to register.
+	// Wait for plugins to boot and extract the listen address.
 	addrRe := regexp.MustCompile(`listening on (\S+)`)
 	ready := false
+	var orchAddr string
 	for i := 0; i < 30; i++ {
 		time.Sleep(500 * time.Millisecond)
 
@@ -190,12 +329,15 @@ func RunServe(args []string) {
 		logStr := string(logData)
 
 		booted := strings.Count(logStr, "registered and booted")
-		if booted >= 3 {
-			ready = true
-			break
+		expectedPlugins := len(cfg.Plugins)
+		if booted >= expectedPlugins {
+			if m := addrRe.FindStringSubmatch(logStr); len(m) >= 2 {
+				orchAddr = m[1]
+				ready = true
+				break
+			}
 		}
 
-		// Check if orchestrator is still alive.
 		if orchCmd.ProcessState != nil {
 			fatal("orchestrator exited unexpectedly. Check %s", logFile)
 		}
@@ -205,25 +347,48 @@ func RunServe(args []string) {
 		fatal("orchestrator did not become ready in 15 seconds. Check %s", logFile)
 	}
 
-	// Extract listen address.
-	logData, _ := os.ReadFile(logFile)
-	matches := addrRe.FindStringSubmatch(string(logData))
-	if len(matches) < 2 {
-		fatal("could not determine orchestrator address. Check %s", logFile)
+	// Write lock so secondary serve processes can attach without launching a new orchestrator.
+	writeLock(absWorkspace, orchCmd.Process.Pid, orchAddr)
+
+	// Start QUIC bridge (optional, background).
+	if available["transport-quic-bridge"] {
+		quicBridgeCmd = exec.Command(bins["transport-quic-bridge"],
+			fmt.Sprintf("--orchestrator-addr=%s", orchAddr),
+			fmt.Sprintf("--certs-dir=%s", absCertsDir),
+			"--listen-addr=:9200",
+		)
+		quicBridgeCmd.Stdout = lf
+		quicBridgeCmd.Stderr = lf
+		if err := quicBridgeCmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "orchestra: warning: failed to start quic-bridge: %v\n", err)
+		}
 	}
-	orchAddr := matches[1]
 
-	// Run transport-stdio (stdin/stdout passthrough).
-	transportCmd := exec.Command(bins["transport-stdio"],
+	// Run transport-stdio for this session (stdin/stdout passthrough).
+	runTransportOnly(bins["transport-stdio"], orchAddr, absCertsDir, logFile)
+}
+
+// runTransportOnly starts a transport-stdio process and waits for it to exit.
+// Used both by the primary serve (after launching the orchestrator) and by
+// secondary serve processes that attach to an already-running orchestrator.
+func runTransportOnly(transportBin, orchAddr, certsDir, logFile string) {
+	lf, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		// Non-fatal — fall back to stderr.
+		lf = os.Stderr
+	} else {
+		defer lf.Close()
+	}
+
+	cmd := exec.Command(transportBin,
 		fmt.Sprintf("--orchestrator-addr=%s", orchAddr),
-		fmt.Sprintf("--certs-dir=%s", absCertsDir),
+		fmt.Sprintf("--certs-dir=%s", certsDir),
 	)
-	transportCmd.Stdin = os.Stdin
-	transportCmd.Stdout = os.Stdout
-	transportCmd.Stderr = lf
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = lf
 
-	if err := transportCmd.Run(); err != nil {
-		// Transport exited — this is normal when stdin closes.
+	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
