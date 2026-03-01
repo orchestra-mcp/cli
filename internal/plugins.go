@@ -3,6 +3,7 @@ package internal
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // RunPlugins handles `orchestra plugins` -- lists all installed third-party plugins.
@@ -13,33 +14,31 @@ func RunPlugins(args []string) {
 	}
 
 	if len(reg.Plugins) == 0 {
-		fmt.Fprintf(os.Stderr, "No plugins installed. Run: orchestra install <github-repo>\n")
+		fmt.Fprintf(os.Stderr, "No plugins installed.\n")
+		fmt.Fprintf(os.Stderr, "  Install with: orchestra plugin install <repo>\n")
 		return
 	}
 
 	fmt.Fprintf(os.Stderr, "Installed plugins:\n")
 	for _, p := range reg.Plugins {
-		// Build a capability summary.
+		status := "enabled"
+		if !p.Enabled {
+			status = "disabled"
+		}
+
 		var caps []string
 		if n := len(p.ProvidesTools); n > 0 {
 			caps = append(caps, fmt.Sprintf("%d tools", n))
 		}
-		if n := len(p.ProvidesStorage); n > 0 {
-			caps = append(caps, fmt.Sprintf("%d storage", n))
+		if len(p.ProvidesAI) > 0 {
+			caps = append(caps, fmt.Sprintf("ai:%s", strings.Join(p.ProvidesAI, ",")))
 		}
 		capStr := ""
 		if len(caps) > 0 {
-			capStr = "  ("
-			for i, c := range caps {
-				if i > 0 {
-					capStr += ", "
-				}
-				capStr += c
-			}
-			capStr += ")"
+			capStr = "  (" + strings.Join(caps, ", ") + ")"
 		}
 
-		fmt.Fprintf(os.Stderr, "  %-24s %-10s %s%s\n", p.ID, p.Version, p.Repo, capStr)
+		fmt.Fprintf(os.Stderr, "  %-28s %-10s %-10s %s%s\n", p.ID, p.Version, status, p.Repo, capStr)
 	}
 }
 

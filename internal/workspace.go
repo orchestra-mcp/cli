@@ -122,9 +122,110 @@ func buildClaudeMD(reg *packRegistry, skills, agents, hooks []string) string {
 	b.WriteString("# CLAUDE.md\n\n")
 	b.WriteString("This project uses [Orchestra MCP](https://github.com/orchestra-mcp/framework) for AI-powered project management.\n\n")
 
+	// Mandatory workflow rule.
+	b.WriteString("## Mandatory Workflow Rule\n\n")
+	b.WriteString("**ALL work MUST go through Orchestra MCP tools.** When the user asks you to do ANY task — build, fix, test, refactor, document, investigate, or change anything:\n\n")
+	b.WriteString("1. `search_features` / `list_features` — check for existing feature\n")
+	b.WriteString("2. `create_feature` — create one if needed (with `kind`: feature/bug/hotfix/chore)\n")
+	b.WriteString("3. `set_current_feature` — start work (moves to in-progress)\n")
+	b.WriteString("4. Do the work\n")
+	b.WriteString("5. `advance_feature` — pass gates with structured evidence\n")
+	b.WriteString("6. `request_review` + `AskUserQuestion` — get user approval\n")
+	b.WriteString("7. `submit_review` — complete\n\n")
+	b.WriteString("**Never do any work without an active feature.** This includes running tests, writing docs, investigating bugs, and refactoring. The MCP enforces gated transitions — you cannot advance without evidence.\n\n")
+
+	// Feature kinds.
+	b.WriteString("### Feature Kinds\n\n")
+	b.WriteString("Every feature has a `kind` field: `feature` (default), `bug`, `hotfix`, or `chore`.\n\n")
+	b.WriteString("- **feature** — New functionality or enhancement\n")
+	b.WriteString("- **bug** — Defect report (Gate 3/docs skipped automatically)\n")
+	b.WriteString("- **hotfix** — Urgent fix (Gate 3/docs skipped automatically)\n")
+	b.WriteString("- **chore** — Maintenance, refactoring, CI work\n\n")
+	b.WriteString("Use `create_bug_report` as a shortcut for bugs — it sets kind=bug, default priority=P1, and optionally links to the feature that caused the regression via `related_feature`.\n\n")
+
+	// Plan-first for large tasks.
+	b.WriteString("### Plan-First for Large Tasks (MANDATORY)\n\n")
+	b.WriteString("When a user request would result in **3 or more features**, you MUST create a plan before implementation:\n\n")
+	b.WriteString("1. `create_plan` — Create the plan in `draft` status with title and description\n")
+	b.WriteString("2. Present the plan to the user via `AskUserQuestion` for approval\n")
+	b.WriteString("3. `approve_plan` — Move from draft → approved\n")
+	b.WriteString("4. `breakdown_plan` — Break the plan into features with dependencies (pass a JSON array of feature definitions). This auto-creates all features with `plan:{plan_id}` labels and sets up dependency chains. Plan moves to `in-progress`.\n")
+	b.WriteString("5. Work each feature through the full lifecycle (in order of dependencies)\n")
+	b.WriteString("6. `complete_plan` — After all linked features are `done`, mark the plan as completed\n\n")
+	b.WriteString("**Do NOT skip the plan step for large tasks.** The plan is stored via MCP and provides traceability.\n\n")
+
+	// User request queue.
+	b.WriteString("### User Request Queue\n\n")
+	b.WriteString("When the user sends a new request while you are busy working on a feature:\n\n")
+	b.WriteString("1. `create_request` — Save it to the queue with kind (feature/hotfix/bug) and priority\n")
+	b.WriteString("2. Continue working on the current feature\n")
+	b.WriteString("3. After the current feature reaches `done`, call `get_next_request` to pick up the next queued request\n")
+	b.WriteString("4. `convert_request` — Convert it into a feature (auto-creates with correct kind/priority)\n")
+	b.WriteString("5. Work the new feature through the full lifecycle\n\n")
+	b.WriteString("Use `list_requests` to see the queue and `dismiss_request` to discard irrelevant requests.\n\n")
+
+	// Bug reporting.
+	b.WriteString("### Bug Reporting\n\n")
+	b.WriteString("When a completed feature causes a regression or breakage:\n\n")
+	b.WriteString("1. `create_bug_report` — Creates a feature with kind=bug, links to the original feature via `related_feature` param\n")
+	b.WriteString("2. The bug follows the same workflow but **Gate 3 (docs) is auto-skipped** for bugs and hotfixes\n")
+	b.WriteString("3. Work the bug through: backlog → todo → in-progress → testing → review → done\n\n")
+
+	// Enforced gates.
+	b.WriteString("### Enforced Gates (MCP validates evidence)\n\n")
+	b.WriteString("The MCP **rejects** `advance_feature` if evidence is missing or malformed at gated transitions. Evidence must be markdown with `## Section` headers, each with at least 10 characters of content. **Sections marked with (files) must contain actual file paths** — not just prose.\n\n")
+	b.WriteString("| Gate | Transition | Required Sections | Tool | Skippable |\n")
+	b.WriteString("|------|-----------|-------------------|------|----------|\n")
+	b.WriteString("| 1 | in-progress → ready-for-testing | `## Summary`, `## Changes` **(files)**, `## Verification` | `advance_feature` | No |\n")
+	b.WriteString("| 2 | in-testing → ready-for-docs | `## Summary`, `## Results`, `## Coverage` | `advance_feature` | No |\n")
+	b.WriteString("| 3 | in-docs → documented | `## Summary`, `## Location` **(files)** | `advance_feature` | **Yes** (bug, hotfix) |\n")
+	b.WriteString("| 4 | documented → in-review | `## Summary`, `## Quality`, `## Checklist` **(files)** | `request_review` | No |\n")
+	b.WriteString("| 5 | in-review → done | User approval via `AskUserQuestion` | `submit_review` | No |\n\n")
+	b.WriteString("**Gate evidence format:**\n```\nevidence: \"## Summary\\n<what was done>\\n\\n## Changes\\n- libs/foo/bar.go (added validation)\\n- libs/baz/qux.go (new file)\\n\\n## Verification\\n<how to test>\"\n```\n\n")
+	b.WriteString("Call `get_gate_requirements` to see what's needed for the next transition.\n\n")
+
+	// Free transitions.
+	b.WriteString("### Free Transitions (no gate)\n\n")
+	b.WriteString("These transitions can be done without evidence:\n")
+	b.WriteString("- backlog → todo, todo → in-progress, ready-for-testing → in-testing, ready-for-docs → in-docs, needs-edits → in-progress\n\n")
+
+	// Review flow.
+	b.WriteString("### Review Flow (Gate 4-5)\n\n")
+	b.WriteString("1. Call `request_review` with self-review evidence (sections: `## Summary`, `## Quality`, `## Checklist`)\n")
+	b.WriteString("2. MCP moves feature to `in-review` and instructs you to ask the user\n")
+	b.WriteString("3. Use `AskUserQuestion` to present the review to the user with options: \"Approve\" / \"Needs Edits\"\n")
+	b.WriteString("4. Call `submit_review` with the user's decision (`status: \"approved\"` or `status: \"needs-edits\"`)\n\n")
+	b.WriteString("**Do NOT call `submit_review` without user approval.** `advance_feature` is blocked from `in-review` — you must use `submit_review`.\n\n")
+
+	// Sub-agent rules.
+	b.WriteString("### Sub-Agent Rules\n\n")
+	b.WriteString("Sub-agents (Task tool) do **NOT** have MCP access. They cannot call `advance_feature` or any workflow tool.\n\n")
+	b.WriteString("- Sub-agents = code only (use during in-progress for writing code)\n")
+	b.WriteString("- Main agent owns lifecycle (YOU handle all gates: test, document, review)\n")
+	b.WriteString("- One feature at a time per assignee (complete full lifecycle before picking next)\n")
+	b.WriteString("- Summarize to user (tell user what sub-agent built before advancing)\n\n")
+
+	// Anti-patterns.
+	b.WriteString("### Anti-Patterns (NEVER DO)\n\n")
+	b.WriteString("- Batch-advancing multiple features through gates in rapid succession\n")
+	b.WriteString("- Writing fake/boilerplate evidence without doing actual work\n")
+	b.WriteString("- Advancing through gates without providing evidence that references real file paths\n")
+	b.WriteString("- Requesting review for one feature then starting another before review resolves\n")
+	b.WriteString("- Calling `submit_review` without asking the user via `AskUserQuestion` first\n\n")
+
+	// Programmatic guardrails.
+	b.WriteString("### Programmatic Guardrails (MCP-Enforced)\n\n")
+	b.WriteString("These rules are enforced at the MCP tool level — violation attempts return errors:\n\n")
+	b.WriteString("1. **One feature at a time per assignee** — `set_current_feature` blocks if the same assignee already has an active feature (in-progress through in-review). Different assignees (parallel agents) can each work on their own feature. Returns `wip_violation` error.\n")
+	b.WriteString("2. **Gate cooldown (30 seconds)** — Gated transitions require at least 30s since the last status change. Prevents instant batch-advancement. Returns `gate_cooldown` error.\n")
+	b.WriteString("3. **File path evidence** — Gate 1 (Changes), Gate 3 (Location), and Gate 4 (Checklist) sections must reference actual file paths. Returns `gate_blocked` error.\n")
+	b.WriteString("4. **Timestamped audit trail** — Every transition appends an ISO-8601 timestamp to the feature body for post-hoc review.\n")
+	b.WriteString("5. **Model capability check** — `set_current_feature` accepts a `model` parameter. Validates the model can handle the feature's size estimate (Haiku→S, Sonnet→S/M, Opus→S/M/L/XL). Returns `model_capability` error.\n")
+	b.WriteString("6. **Review requires user approval** — `advance_feature` is blocked from `in-review`. Only `submit_review` can move to `done`.\n\n")
+
 	// Available Tools section.
 	b.WriteString("## Available Tools\n\n")
-	b.WriteString("Orchestra provides **49 tools** via MCP (34 feature workflow + 15 marketplace) and **5 prompts**.\n\n")
+	b.WriteString("Orchestra provides **64 tools** via MCP (49 feature workflow + 15 marketplace) and **5 prompts**.\n\n")
 	b.WriteString("Run `orchestra serve` to start the MCP server. IDE config is in `.mcp.json`.\n\n")
 
 	// Installed Packs section.

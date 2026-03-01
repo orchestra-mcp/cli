@@ -19,6 +19,8 @@ func main() {
 		internal.RunInit(os.Args[2:])
 	case "serve", "start":
 		internal.RunServe(os.Args[2:])
+	case "plugin":
+		internal.RunPlugin(os.Args[2:])
 	case "install":
 		internal.RunInstall(os.Args[2:])
 	case "plugins":
@@ -45,37 +47,40 @@ func printUsage() {
 Usage:
   orchestra serve        Start the MCP stdio server (default)
   orchestra init         Initialize MCP configs for your IDE(s)
-  orchestra install      Install a plugin from a GitHub repo
+  orchestra plugin       Manage external plugins (install/remove/enable/disable)
   orchestra pack         Manage content packs (skills, agents, hooks)
+  orchestra install      Install a plugin from a GitHub repo
   orchestra plugins      List installed plugins
   orchestra uninstall    Remove an installed plugin
   orchestra update       Update Orchestra to latest version
-  orchestra update <id>  Update an installed plugin to latest
   orchestra version      Print version info
   orchestra help         Show this help
 
+Plugin commands:
+  orchestra plugin install <repo>[@version]   Install a plugin binary
+  orchestra plugin remove <name>              Remove an installed plugin
+  orchestra plugin list                       List installed plugins
+  orchestra plugin enable <name>              Enable a disabled plugin
+  orchestra plugin disable <name>             Disable a plugin (keep binary)
+  orchestra plugin search <query>             Search available plugins
+  orchestra plugin update [name]              Update one or all plugins
+  orchestra plugin info <name>                Show plugin details
+
 Serve flags:
   --workspace=DIR   Project workspace directory (default: current directory)
-  --certs-dir=DIR   mTLS certificates directory (default: ~/.orchestra/certs)
   --log=FILE        Log file path (default: .orchestra-mcp.log)
+  --no-plugins      Skip loading external plugins (core-only mode)
 
 Init flags:
   --workspace=DIR   Project directory to initialize (default: current directory)
   --ide=NAME        Target IDE: claude, cursor, vscode, windsurf, codex, gemini, zed, continue, cline
   --all             Generate configs for all supported IDEs
 
-Install flags:
-  --source          Force build from source (skip binary download)
-  --binary          Force binary download (fail if unavailable)
-  --dev             Clone full repo into libs/ for development
-
 Examples:
-  orchestra install github.com/someone/my-plugin
-  orchestra install github.com/someone/my-plugin@v1.2.0
-  orchestra install github.com/someone/my-plugin --source
-  orchestra install github.com/orchestra-mcp/sdk-go --dev
-  orchestra uninstall my-plugin
-  orchestra update
-  orchestra update my-plugin
+  orchestra plugin install github.com/orchestra-mcp/plugin-devtools-git
+  orchestra plugin search devtools
+  orchestra plugin disable bridge.openai
+  orchestra plugin enable bridge.openai
+  orchestra serve --no-plugins
 `)
 }

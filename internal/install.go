@@ -19,9 +19,16 @@ import (
 // pluginManifest is the JSON structure returned by `<binary> --manifest`.
 type pluginManifest struct {
 	ID              string   `json:"id"`
+	Version         string   `json:"version"`
+	Description     string   `json:"description"`
+	Author          string   `json:"author"`
 	ProvidesTools   []string `json:"provides_tools"`
 	ProvidesStorage []string `json:"provides_storage"`
+	ProvidesAI      []string `json:"provides_ai"`
+	ProvidesPrompts []string `json:"provides_prompts"`
 	NeedsStorage    []string `json:"needs_storage"`
+	NeedsAI         []string `json:"needs_ai"`
+	NeedsTools      []string `json:"needs_tools"`
 }
 
 // RunInstall handles `orchestra install <repo> [flags]`.
@@ -117,6 +124,14 @@ func RunInstall(args []string) {
 		ProvidesTools:   manifest.ProvidesTools,
 		ProvidesStorage: manifest.ProvidesStorage,
 		NeedsStorage:    manifest.NeedsStorage,
+		Enabled:         true,
+		ProvidesAI:      manifest.ProvidesAI,
+		NeedsAI:         manifest.NeedsAI,
+		NeedsTools:      manifest.NeedsTools,
+		ProvidesPrompts: manifest.ProvidesPrompts,
+		Description:     manifest.Description,
+		Author:          manifest.Author,
+		Platform:        fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH),
 	}
 
 	if err := SaveRegistry(reg); err != nil {

@@ -16,6 +16,17 @@ type PluginEntry struct {
 	ProvidesTools   []string `json:"provides_tools"`
 	ProvidesStorage []string `json:"provides_storage"`
 	NeedsStorage    []string `json:"needs_storage"`
+
+	// Extended fields for selective plugin loading.
+	Enabled         bool     `json:"enabled"`
+	ProvidesAI      []string `json:"provides_ai,omitempty"`
+	NeedsAI         []string `json:"needs_ai,omitempty"`
+	NeedsTools      []string `json:"needs_tools,omitempty"`
+	ProvidesPrompts []string `json:"provides_prompts,omitempty"`
+	Description     string   `json:"description,omitempty"`
+	Author          string   `json:"author,omitempty"`
+	Platform        string   `json:"platform,omitempty"`
+	UpdatedAt       string   `json:"updated_at,omitempty"`
 }
 
 // PluginRegistry holds all installed third-party plugins, keyed by repo URL.
