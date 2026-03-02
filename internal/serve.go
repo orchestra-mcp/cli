@@ -37,6 +37,14 @@ func RunServe(args []string) {
 		fatal("resolve workspace: %v", err)
 	}
 
+	// Acquire PID lock file — only one orchestra serve per workspace.
+	pidFile := filepath.Join(absWorkspace, ".orchestra.pid")
+	if err := acquirePIDLock(pidFile); err != nil {
+		fmt.Fprintf(os.Stderr, "orchestra: %v\n", err)
+		os.Exit(0) // exit cleanly, another instance is running
+	}
+	defer os.Remove(pidFile)
+
 	// Set up log file.
 	logFile := *logPath
 	if logFile == "" {
@@ -117,19 +125,25 @@ func RunServe(args []string) {
 		}
 	}()
 
-	// Stdio transport for this IDE session (stdin/stdout JSON-RPC).
-	transport := transportstdio.NewTransport(router, os.Stdin, os.Stdout)
-
 	toolCount := len(router.ListToolNames())
 	coreCount := 3 // storage.markdown + tools.features + tools.marketplace
 	extCount := len(externalProcesses)
 	log.Printf("[serve] ready — %d tools from %d core + %d external plugins", toolCount, coreCount, extCount)
 
-	if err := transport.Run(ctx); err != nil {
-		if ctx.Err() == nil {
-			log.Printf("[serve] transport error: %v", err)
+	// Run stdio transport in a goroutine. If stdin closes (desktop app mode),
+	// the transport returns but the process keeps running for TCP connections.
+	// The process only exits on SIGINT/SIGTERM.
+	go func() {
+		transport := transportstdio.NewTransport(router, os.Stdin, os.Stdout)
+		if err := transport.Run(ctx); err != nil {
+			if ctx.Err() == nil {
+				log.Printf("[serve] stdio transport ended: %v", err)
+			}
 		}
-	}
+	}()
+
+	// Block until signal (SIGINT/SIGTERM handled above).
+	<-ctx.Done()
 }
 
 // initStoragePlugin creates a plugin builder, calls the register function to
@@ -150,6 +164,26 @@ func defaultCertsDir() string {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "orchestra: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// acquirePIDLock writes our PID to the lock file. If the file already exists
+// and the PID inside is still alive, returns an error (another instance is running).
+func acquirePIDLock(path string) error {
+	data, err := os.ReadFile(path)
+	if err == nil {
+		var pid int
+		if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err == nil && pid > 0 {
+			// Check if process is still alive
+			proc, err := os.FindProcess(pid)
+			if err == nil {
+				// Signal 0 checks if process exists without killing it
+				if proc.Signal(syscall.Signal(0)) == nil {
+					return fmt.Errorf("another orchestra serve is running (pid %d)", pid)
+				}
+			}
+		}
+	}
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)
 }
 
 func resolveHome(path string) string {
