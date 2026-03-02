@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -104,7 +105,11 @@ func RunServe(args []string) {
 	// PHASE 3: SIGNAL HANDLING
 	// ================================================================
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	if runtime.GOOS == "windows" {
+		signal.Notify(sigCh, os.Interrupt)
+	} else {
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	}
 	go func() {
 		<-sigCh
 		log.Println("[serve] shutting down...")

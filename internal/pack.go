@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -455,7 +456,9 @@ func installPackFromGit(workspace, repo, version string) (*packManifest, error) 
 		if err := copySingleFile(src, dst); err != nil {
 			return nil, fmt.Errorf("copy hook %s: %w", name, err)
 		}
-		os.Chmod(dst, 0755)
+		if runtime.GOOS != "windows" {
+			os.Chmod(dst, 0755)
+		}
 	}
 
 	return &manifest, nil

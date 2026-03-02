@@ -16,6 +16,14 @@ import (
 	"time"
 )
 
+// binaryExt returns ".exe" on Windows, "" on other platforms.
+func binaryExt() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
 // pluginManifest is the JSON structure returned by `<binary> --manifest`.
 type pluginManifest struct {
 	ID              string   `json:"id"`
@@ -63,7 +71,7 @@ func RunInstall(args []string) {
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		fatal("create plugin bin dir: %v", err)
 	}
-	binPath := filepath.Join(binDir, name)
+	binPath := filepath.Join(binDir, name+binaryExt())
 
 	installed := false
 
@@ -90,9 +98,11 @@ func RunInstall(args []string) {
 		fmt.Fprintf(os.Stderr, "  Built from source.\n")
 	}
 
-	// Make binary executable.
-	if err := os.Chmod(binPath, 0755); err != nil {
-		fatal("chmod binary: %v", err)
+	// Make binary executable (not needed on Windows).
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(binPath, 0755); err != nil {
+			fatal("chmod binary: %v", err)
+		}
 	}
 
 	// Query plugin manifest.
@@ -247,7 +257,8 @@ func downloadRelease(repo, version, name, destPath string) error {
 	}
 
 	// Extract binary from tar.gz.
-	return extractTarGz(resp.Body, name, destPath)
+	// On Windows, the archive contains name.exe; on other platforms, just name.
+	return extractTarGz(resp.Body, name+binaryExt(), destPath)
 }
 
 // extractTarGz reads a tar.gz stream and extracts the named binary to destPath.
@@ -269,8 +280,12 @@ func extractTarGz(r io.Reader, binaryName, destPath string) error {
 		}
 
 		// Look for the binary: could be at root or in a subdirectory.
+		// Match both "name" and "name.exe" for cross-platform tarballs.
 		baseName := filepath.Base(header.Name)
-		if baseName == binaryName && header.Typeflag == tar.TypeReg {
+		nameMatch := baseName == binaryName ||
+			(runtime.GOOS == "windows" && baseName == binaryName+".exe") ||
+			(runtime.GOOS == "windows" && baseName+".exe" == binaryName)
+		if nameMatch && header.Typeflag == tar.TypeReg {
 			out, err := os.Create(destPath)
 			if err != nil {
 				return fmt.Errorf("create file: %w", err)

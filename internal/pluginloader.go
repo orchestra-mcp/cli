@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -137,7 +138,11 @@ func spawnPlugin(
 		args = append(args, "--orchestrator-addr", orchestratorAddr)
 	}
 
-	cmd := exec.CommandContext(pluginCtx, entry.Binary, args...)
+	binaryPath := entry.Binary
+	if runtime.GOOS == "windows" && !strings.HasSuffix(binaryPath, ".exe") {
+		binaryPath += ".exe"
+	}
+	cmd := exec.CommandContext(pluginCtx, binaryPath, args...)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

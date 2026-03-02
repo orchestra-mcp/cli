@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // IDEConfig defines how to generate MCP config for a specific IDE.
@@ -242,13 +243,20 @@ func continueConfig() *IDEConfig {
 			return filepath.Join(ws, ".continue", "mcpServers", "orchestra.yaml")
 		},
 		Generate: func(ws, bin string) ([]byte, error) {
+			// Normalize paths to forward slashes for YAML on Windows.
+			yamlBin := bin
+			yamlWs := ws
+			if runtime.GOOS == "windows" {
+				yamlBin = filepath.ToSlash(bin)
+				yamlWs = filepath.ToSlash(ws)
+			}
 			yaml := fmt.Sprintf(`name: orchestra
 command: %s
 args:
   - serve
   - --workspace
   - %s
-`, bin, ws)
+`, yamlBin, yamlWs)
 			return []byte(yaml), nil
 		},
 	}

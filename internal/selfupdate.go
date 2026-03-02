@@ -180,24 +180,27 @@ func selfUpdate(targetVersion string) error {
 	}
 
 	// Replace each binary atomically.
+	ext := binaryExt()
 	for _, name := range orchestraBinaries {
-		srcPath := filepath.Join(tmpDir, name)
+		srcPath := filepath.Join(tmpDir, name+ext)
 		if _, err := os.Stat(srcPath); os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "  [SKIP] %s (not in release)\n", name)
 			continue
 		}
 
-		destPath := filepath.Join(installDir, name)
+		destPath := filepath.Join(installDir, name+ext)
 
 		// Atomic replace: rename is atomic on same filesystem.
 		if err := os.Rename(srcPath, destPath); err != nil {
 			return fmt.Errorf("replace %s: %w", name, err)
 		}
-		if err := os.Chmod(destPath, 0755); err != nil {
-			return fmt.Errorf("chmod %s: %w", name, err)
+		if runtime.GOOS != "windows" {
+			if err := os.Chmod(destPath, 0755); err != nil {
+				return fmt.Errorf("chmod %s: %w", name, err)
+			}
 		}
 
-		fmt.Fprintf(os.Stderr, "  [OK] %s\n", name)
+		fmt.Fprintf(os.Stderr, "  [OK] %s\n", name+ext)
 	}
 
 	return nil
@@ -211,10 +214,11 @@ func extractTarGzAll(r io.Reader, destDir string) error {
 	}
 	defer gz.Close()
 
-	// Build a set of known binaries for safety.
+	// Build a set of known binaries for safety (with platform extension).
+	ext := binaryExt()
 	known := make(map[string]bool, len(orchestraBinaries))
 	for _, name := range orchestraBinaries {
-		known[name] = true
+		known[name+ext] = true
 	}
 
 	tr := tar.NewReader(gz)
