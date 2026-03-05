@@ -6,19 +6,23 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"time"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 
 	"github.com/orchestra-mcp/cli/internal/inprocess"
+	"github.com/orchestra-mcp/sdk-go/globaldb"
 	"github.com/orchestra-mcp/sdk-go/plugin"
 
 	// ----------------------------------------------------------------
 	// Core plugins (always bundled in-process, never removable)
 	// ----------------------------------------------------------------
 	storagemarkdown "github.com/orchestra-mcp/plugin-storage-markdown"
+	storagesqlite "github.com/orchestra-mcp/plugin-storage-sqlite"
 	toolsfeatures "github.com/orchestra-mcp/plugin-tools-features"
 	toolsmarketplace "github.com/orchestra-mcp/plugin-tools-marketplace"
 	transportstdio "github.com/orchestra-mcp/plugin-transport-stdio"
@@ -28,8 +32,9 @@ func RunServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	workspace := fs.String("workspace", ".", "Project workspace directory")
 	tcpAddr := fs.String("tcp-addr", "localhost:50101", "TCP address for desktop app connections")
-	logPath := fs.String("log", "", "Log file path (default: <workspace>/.orchestra-mcp.log)")
+	logPath := fs.String("log", "", "Log file path (default: OS log directory)")
 	noPlugins := fs.Bool("no-plugins", false, "Skip loading external plugins (core-only mode)")
+	storageBackend := fs.String("storage", "sqlite", "Storage backend: sqlite (default) or markdown")
 	fs.Parse(args)
 
 	// Resolve absolute workspace path.
@@ -38,18 +43,36 @@ func RunServe(args []string) {
 		fatal("resolve workspace: %v", err)
 	}
 
+	// Export workspace so child plugins can discover the project root.
+	os.Setenv("ORCHESTRA_WORKSPACE", absWorkspace)
+
+	// State directory for PID and log files — never in the project root.
+	stateDir := orchestraStateDir()
+	os.MkdirAll(stateDir, 0755)
+
 	// Acquire PID lock file — only one orchestra serve per workspace.
-	pidFile := filepath.Join(absWorkspace, ".orchestra.pid")
+	// PID file is keyed by workspace slug to allow multiple workspaces.
+	pidFile := filepath.Join(stateDir, workspaceSlug(absWorkspace)+".pid")
 	if err := acquirePIDLock(pidFile); err != nil {
-		fmt.Fprintf(os.Stderr, "orchestra: %v\n", err)
-		os.Exit(0) // exit cleanly, another instance is running
+		// Another instance is running — stop it and take over.
+		// MCP clients (Claude Code, Cursor) expect to own the stdio process.
+		// When they restart /mcp, the old process must yield.
+		fmt.Fprintf(os.Stderr, "orchestra: %v — stopping it to take over\n", err)
+		stopExistingInstance(pidFile)
+		// Retry acquiring the lock after stopping.
+		if err := acquirePIDLock(pidFile); err != nil {
+			fmt.Fprintf(os.Stderr, "orchestra: still blocked: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	defer os.Remove(pidFile)
 
-	// Set up log file.
+	// Set up log file in the OS log directory.
 	logFile := *logPath
 	if logFile == "" {
-		logFile = filepath.Join(absWorkspace, ".orchestra-mcp.log")
+		logDir := orchestraLogDir()
+		os.MkdirAll(logDir, 0755)
+		logFile = filepath.Join(logDir, workspaceSlug(absWorkspace)+".log")
 	}
 	os.WriteFile(logFile, nil, 0644)
 	lf, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -69,8 +92,24 @@ func RunServe(args []string) {
 	// ================================================================
 
 	// 1a. Storage (must be first — other plugins depend on it)
-	router.SetStorageHandler(storagemarkdown.NewStorage(absWorkspace))
-	log.Printf("[serve] storage.markdown initialized (workspace: %s)", absWorkspace)
+	if *storageBackend == "markdown" {
+		router.SetStorageHandler(storagemarkdown.NewStorage(absWorkspace))
+		log.Printf("[serve] storage.markdown initialized (workspace: %s)", absWorkspace)
+	} else {
+		router.SetStorageHandler(storagesqlite.NewStorage(absWorkspace))
+		log.Printf("[serve] storage.sqlite initialized (workspace: %s)", absWorkspace)
+	}
+
+	// 1a-2. Global database — migrate JSON configs (me.json, accounts.json, workspaces.json)
+	// into globaldb on first run. These are machine-local and must NOT be in git.
+	globaldb.MigrateMeJSON()
+	globaldb.MigrateAccountsJSON()
+	globaldb.MigrateWorkspacesJSON()
+	defer globaldb.Close()
+
+	// 1a-3. Self-update tools + background version check.
+	registerUpdateTools(router)
+	go backgroundVersionCheck()
 
 	// 1b. Core tools
 	initStoragePlugin(router, "tools.features", func(b *plugin.PluginBuilder) {
@@ -172,23 +211,75 @@ func fatal(format string, args ...any) {
 }
 
 // acquirePIDLock writes our PID to the lock file. If the file already exists
-// and the PID inside is still alive, returns an error (another instance is running).
+// and the PID inside is still alive AND is actually an orchestra process, returns
+// an error (another instance is running). Stale PIDs from crashed processes or
+// PIDs reused by unrelated processes are ignored.
 func acquirePIDLock(path string) error {
 	data, err := os.ReadFile(path)
 	if err == nil {
 		var pid int
-		if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err == nil && pid > 0 {
-			// Check if process is still alive
-			proc, err := os.FindProcess(pid)
-			if err == nil {
-				// Signal 0 checks if process exists without killing it
-				if proc.Signal(syscall.Signal(0)) == nil {
-					return fmt.Errorf("another orchestra serve is running (pid %d)", pid)
-				}
+		if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err == nil && pid > 0 && pid != os.Getpid() {
+			// Check if the PID is still alive AND is actually an orchestra process.
+			// Signal(0) alone is not enough — on macOS/Linux, any existing process
+			// will pass, even if the PID was reused by an unrelated process.
+			if isOrchestraProcess(pid) {
+				return fmt.Errorf("another orchestra serve is running (pid %d)", pid)
 			}
 		}
 	}
 	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)
+}
+
+// isOrchestraProcess checks if a PID belongs to a running orchestra process.
+func isOrchestraProcess(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// Signal 0: check if process exists at all.
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
+	// Verify this is actually an orchestra process by checking /proc or ps.
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		out, err := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "comm=").Output()
+		if err != nil {
+			return false
+		}
+		return strings.Contains(strings.TrimSpace(string(out)), "orchestra")
+	}
+	return false // on unknown OS, assume stale
+}
+
+// stopExistingInstance reads the PID from the lock file and sends SIGTERM to
+// gracefully stop the previous orchestra process, then waits for it to exit.
+func stopExistingInstance(pidFile string) {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return
+	}
+	var pid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil || pid <= 0 {
+		return
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	// Send SIGTERM for graceful shutdown.
+	if runtime.GOOS == "windows" {
+		proc.Kill()
+	} else {
+		proc.Signal(syscall.SIGTERM)
+	}
+	// Wait briefly for the process to exit.
+	for i := 0; i < 20; i++ { // up to 2 seconds
+		if proc.Signal(syscall.Signal(0)) != nil {
+			break // process exited
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	os.Remove(pidFile)
 }
 
 func resolveHome(path string) string {
@@ -197,4 +288,52 @@ func resolveHome(path string) string {
 		return filepath.Join(home, path[1:])
 	}
 	return path
+}
+
+// orchestraStateDir returns the OS-appropriate directory for runtime state
+// (PID files). Located under ~/.orchestra/run/ on all platforms.
+func orchestraStateDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".orchestra", "run")
+}
+
+// orchestraLogDir returns the OS-appropriate directory for log files.
+//   - macOS:   ~/Library/Logs/Orchestra/
+//   - Linux:   ~/.local/state/orchestra/
+//   - Windows: %LOCALAPPDATA%\Orchestra\Logs\
+func orchestraLogDir() string {
+	switch runtime.GOOS {
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "Library", "Logs", "Orchestra")
+	case "windows":
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			return filepath.Join(localAppData, "Orchestra", "Logs")
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "AppData", "Local", "Orchestra", "Logs")
+	default: // linux and others
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".local", "state", "orchestra")
+	}
+}
+
+// workspaceSlug creates a filesystem-safe slug from a workspace path for use
+// in PID and log filenames. E.g. "/Users/alice/Sites/my-project" → "my-project".
+func workspaceSlug(absPath string) string {
+	base := filepath.Base(absPath)
+	// Replace any non-alphanumeric/hyphen/underscore chars with hyphens.
+	var b strings.Builder
+	for _, r := range strings.ToLower(base) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		slug = "default"
+	}
+	return slug
 }

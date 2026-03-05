@@ -19,6 +19,10 @@ func main() {
 		internal.RunInit(os.Args[2:])
 	case "serve", "start":
 		internal.RunServe(os.Args[2:])
+	case "stop":
+		internal.RunStop(os.Args[2:])
+	case "restart":
+		internal.RunRestart(os.Args[2:])
 	case "plugin":
 		internal.RunPlugin(os.Args[2:])
 	case "install":
@@ -31,6 +35,8 @@ func main() {
 		internal.RunUninstall(os.Args[2:])
 	case "update", "upgrade":
 		internal.RunUpdate(os.Args[2:])
+	case "log", "logs":
+		internal.RunLog(os.Args[2:])
 	case "version", "--version", "-v":
 		internal.RunVersion()
 	case "help", "--help", "-h":
@@ -46,6 +52,9 @@ func printUsage() {
 
 Usage:
   orchestra serve        Start the MCP stdio server (default)
+  orchestra stop         Stop a running orchestra instance
+  orchestra restart      Restart orchestra (stop + start)
+  orchestra log          Tail the latest orchestra log file
   orchestra init         Initialize MCP configs for your IDE(s)
   orchestra plugin       Manage external plugins (install/remove/enable/disable)
   orchestra pack         Manage content packs (skills, agents, hooks)
@@ -68,8 +77,20 @@ Plugin commands:
 
 Serve flags:
   --workspace=DIR   Project workspace directory (default: current directory)
-  --log=FILE        Log file path (default: .orchestra-mcp.log)
+  --tcp-addr=ADDR   TCP address for desktop apps (default: localhost:50101)
+  --log=FILE        Log file path (default: OS log directory)
   --no-plugins      Skip loading external plugins (core-only mode)
+
+Stop/Restart flags:
+  --workspace=DIR   Project workspace directory (default: current directory)
+  --tcp-addr=ADDR   TCP address (restart only, default: localhost:50101)
+  --log=FILE        Log file path (restart only)
+  --no-plugins      Skip external plugins (restart only)
+
+Log flags:
+  -n=NUM            Number of lines to show (default: 50)
+  -f                Follow log output, tail -f style (default: true)
+  --workspace=DIR   Show log for specific workspace
 
 Init flags:
   --workspace=DIR   Project directory to initialize (default: current directory)

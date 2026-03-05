@@ -63,15 +63,21 @@ func (s *TCPServer) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-// handleConn reads a single PluginRequest, dispatches via the router, and
-// writes the PluginResponse. Uses the SDK's ReadMessage/WriteMessage which
-// implement the 4-byte length-delimited Protobuf framing.
+// handleConn reads a single PluginRequest. If it's a StreamStart, the
+// connection is handed off to handleStreamConn for persistent streaming.
+// Otherwise it dispatches a single request/response pair via the router.
 func (s *TCPServer) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	var req pluginv1.PluginRequest
 	if err := plugin.ReadMessage(conn, &req); err != nil {
 		log.Printf("[inprocess] tcp read: %v", err)
+		return
+	}
+
+	// Streaming request — keep connection alive for multiple chunks.
+	if ss := req.GetStreamStart(); ss != nil {
+		s.handleStreamConn(ctx, conn, &req, ss)
 		return
 	}
 
@@ -84,5 +90,82 @@ func (s *TCPServer) handleConn(ctx context.Context, conn net.Conn) {
 
 	if err := plugin.WriteMessage(conn, resp); err != nil {
 		log.Printf("[inprocess] tcp write: %v", err)
+	}
+}
+
+// handleStreamConn handles a streaming tool call. It looks up the stream
+// handler, creates a chunks channel, writes each chunk as a StreamChunk
+// Protobuf message, and finishes with StreamEnd.
+func (s *TCPServer) handleStreamConn(ctx context.Context, conn net.Conn, req *pluginv1.PluginRequest, ss *pluginv1.StreamStart) {
+	toolName := ss.GetToolName()
+	streamID := ss.GetStreamId()
+
+	handler, ok := s.router.GetStreamHandler(toolName)
+	if !ok {
+		// No handler — send StreamEnd with error.
+		endResp := &pluginv1.PluginResponse{
+			RequestId: req.GetRequestId(),
+			Response: &pluginv1.PluginResponse_StreamEnd{
+				StreamEnd: &pluginv1.StreamEnd{
+					StreamId:     streamID,
+					Success:      false,
+					ErrorCode:    "tool_not_found",
+					ErrorMessage: fmt.Sprintf("no streaming handler for tool %q", toolName),
+				},
+			},
+		}
+		_ = plugin.WriteMessage(conn, endResp)
+		return
+	}
+
+	chunks := make(chan []byte, 64)
+	var sequence int64
+
+	// Writer goroutine: drains chunks and writes StreamChunk messages.
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for data := range chunks {
+			chunkResp := &pluginv1.PluginResponse{
+				RequestId: req.GetRequestId(),
+				Response: &pluginv1.PluginResponse_StreamChunk{
+					StreamChunk: &pluginv1.StreamChunk{
+						StreamId:    streamID,
+						Data:        data,
+						ContentType: "application/json",
+						Sequence:    sequence,
+					},
+				},
+			}
+			if err := plugin.WriteMessage(conn, chunkResp); err != nil {
+				log.Printf("[inprocess] tcp stream write chunk: %v", err)
+				return
+			}
+			sequence++
+		}
+	}()
+
+	// Call the streaming handler — blocks until done.
+	handlerErr := handler(ctx, ss, chunks)
+	close(chunks)
+	<-writerDone
+
+	// Send StreamEnd.
+	endResp := &pluginv1.PluginResponse{
+		RequestId: req.GetRequestId(),
+		Response: &pluginv1.PluginResponse_StreamEnd{
+			StreamEnd: &pluginv1.StreamEnd{
+				StreamId:    streamID,
+				Success:     handlerErr == nil,
+				TotalChunks: sequence,
+			},
+		},
+	}
+	if handlerErr != nil {
+		endResp.GetStreamEnd().ErrorCode = "stream_error"
+		endResp.GetStreamEnd().ErrorMessage = handlerErr.Error()
+	}
+	if err := plugin.WriteMessage(conn, endResp); err != nil {
+		log.Printf("[inprocess] tcp stream write end: %v", err)
 	}
 }

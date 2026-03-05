@@ -140,8 +140,9 @@ func buildClaudeMD(reg *packRegistry, skills, agents, hooks []string) string {
 	b.WriteString("- **feature** — New functionality or enhancement\n")
 	b.WriteString("- **bug** — Defect report (Gate 3/docs skipped automatically)\n")
 	b.WriteString("- **hotfix** — Urgent fix (Gate 3/docs skipped automatically)\n")
-	b.WriteString("- **chore** — Maintenance, refactoring, CI work\n\n")
-	b.WriteString("Use `create_bug_report` as a shortcut for bugs — it sets kind=bug, default priority=P1, and optionally links to the feature that caused the regression via `related_feature`.\n\n")
+	b.WriteString("- **chore** — Maintenance, refactoring, CI work\n")
+	b.WriteString("- **testcase** — QA test case linked to a parent feature (Gate 3/docs skipped automatically)\n\n")
+	b.WriteString("Use `create_bug_report` as a shortcut for bugs. Use `create_test_case` or `bulk_create_test_cases` for QA test cases linked to a feature.\n\n")
 
 	// Plan-first for large tasks.
 	b.WriteString("### Plan-First for Large Tasks (MANDATORY)\n\n")
@@ -223,9 +224,32 @@ func buildClaudeMD(reg *packRegistry, skills, agents, hooks []string) string {
 	b.WriteString("5. **Model capability check** — `set_current_feature` accepts a `model` parameter. Validates the model can handle the feature's size estimate (Haiku→S, Sonnet→S/M, Opus→S/M/L/XL). Returns `model_capability` error.\n")
 	b.WriteString("6. **Review requires user approval** — `advance_feature` is blocked from `in-review`. Only `submit_review` can move to `done`.\n\n")
 
+	// Git & Sync section.
+	b.WriteString("## Git & Sync (Natural Language Mapping)\n\n")
+	b.WriteString("The MCP provides 6 git tools that use the current user's person profile for author identity. **Map natural language requests to these tools automatically:**\n\n")
+	b.WriteString("| User says | Action |\n")
+	b.WriteString("|-----------|--------|\n")
+	b.WriteString("| \"sync my changes\", \"push my updates\", \"sync to cloud\" | `git_quick_commit` (stage all + commit) → `git_push` |\n")
+	b.WriteString("| \"get latest\", \"pull updates\", \"sync from cloud\" | `git_pull` |\n")
+	b.WriteString("| \"save my work\", \"commit this\" | `git_quick_commit` |\n")
+	b.WriteString("| \"push\", \"push to remote\" | `git_push` |\n")
+	b.WriteString("| \"create a branch for X\" | `git_create_branch` |\n")
+	b.WriteString("| \"merge X\" | `git_merge_branch` |\n")
+	b.WriteString("| \"what's the status\", \"git status\" | `git_status_summary` |\n")
+	b.WriteString("| \"pull and rebase\" | `git_pull` with `rebase: true` |\n\n")
+	b.WriteString("When the user says \"sync\" without a specific message, generate a meaningful commit message from the staged changes. All commits use the current user's person profile (name + github_email). No `Co-Authored-By` lines.\n\n")
+
+	// Onboarding section.
+	b.WriteString("## Onboarding (First Interaction)\n\n")
+	b.WriteString("On the first interaction with a new user, check `get_current_user`. If not configured:\n\n")
+	b.WriteString("1. Use `AskUserQuestion` to collect: name, role, email, github_email, bio, timezone\n")
+	b.WriteString("2. `create_person` with the collected profile data\n")
+	b.WriteString("3. `set_current_user` to link them to the project\n")
+	b.WriteString("4. Confirm the setup — the profile persists in `~/.orchestra/me.json` across sessions\n\n")
+
 	// Available Tools section.
 	b.WriteString("## Available Tools\n\n")
-	b.WriteString("Orchestra provides **64 tools** via MCP (49 feature workflow + 15 marketplace) and **5 prompts**.\n\n")
+	b.WriteString("Orchestra provides **85 tools** via MCP (70 feature workflow + 15 marketplace) and **5 prompts**.\n\n")
 	b.WriteString("Run `orchestra serve` to start the MCP server. IDE config is in `.mcp.json`.\n\n")
 
 	// Installed Packs section.

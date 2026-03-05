@@ -464,6 +464,14 @@ func (r *Router) routePromptGet(ctx context.Context, req *pluginv1.PromptGetRequ
 	}, nil
 }
 
+// GetStreamHandler returns the streaming tool handler for the given tool name.
+func (r *Router) GetStreamHandler(toolName string) (plugin.StreamingToolHandler, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	h, ok := r.streamHandlers[toolName]
+	return h, ok
+}
+
 // ListToolNames returns a list of all registered tool names (for logging).
 func (r *Router) ListToolNames() []string {
 	r.mu.RLock()

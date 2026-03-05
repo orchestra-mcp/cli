@@ -3,9 +3,11 @@ package internal
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +15,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/cli/internal/inprocess"
+	"github.com/orchestra-mcp/sdk-go/plugin"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 const (
@@ -25,6 +32,7 @@ var orchestraBinaries = []string{
 	"orchestra",
 	"orchestrator",
 	"storage-markdown",
+	"storage-sqlite",
 	"tools-features",
 	"transport-stdio",
 	"tools-marketplace",
@@ -267,4 +275,137 @@ func CheckAndPromptUpdate() {
 	}
 	fmt.Fprintf(os.Stderr, "\n  Update available: %s (current: %s)\n", latest, Version)
 	fmt.Fprintf(os.Stderr, "  Run 'orchestra update' to upgrade\n")
+}
+
+// ---------- MCP tools for AI-agent-driven updates ----------
+
+// registerUpdateTools registers check_update and update_orchestra on the router.
+func registerUpdateTools(router *inprocess.Router) {
+	builder := plugin.New("tools.update")
+
+	builder.RegisterTool("check_update",
+		"Check if a newer version of Orchestra is available. Returns current version, latest version, and whether an update is available.",
+		checkUpdateSchema(), checkUpdateHandler())
+
+	builder.RegisterTool("update_orchestra",
+		"Download and install the latest Orchestra release. After a successful update the IDE must be restarted for the new binaries to take effect.",
+		updateOrchestraSchema(), updateOrchestraHandler())
+
+	ep := builder.Export()
+	router.RegisterPlugin(ep)
+	log.Printf("[serve] tools.update initialized (%d tools)", len(ep.Tools))
+}
+
+func checkUpdateSchema() *structpb.Struct {
+	s, _ := structpb.NewStruct(map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	})
+	return s
+}
+
+func updateOrchestraSchema() *structpb.Struct {
+	s, _ := structpb.NewStruct(map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	})
+	return s
+}
+
+func checkUpdateHandler() plugin.ToolHandler {
+	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
+		latest := checkLatestVersion()
+		if latest == "" {
+			return &pluginv1.ToolResponse{
+				Success: true,
+				Result: mustStruct(map[string]any{
+					"current_version":  Version,
+					"latest_version":   "",
+					"update_available": false,
+					"error":            "Could not reach GitHub API to check for updates.",
+				}),
+			}, nil
+		}
+
+		updateAvailable := isNewerVersion(Version, latest)
+		result := map[string]any{
+			"current_version":  Version,
+			"latest_version":   latest,
+			"update_available": updateAvailable,
+		}
+		if updateAvailable {
+			result["message"] = fmt.Sprintf("Orchestra %s is available (you have %s). Call update_orchestra to install it.", latest, Version)
+		} else {
+			result["message"] = fmt.Sprintf("Orchestra is up to date (%s).", Version)
+		}
+
+		return &pluginv1.ToolResponse{
+			Success: true,
+			Result:  mustStruct(result),
+		}, nil
+	}
+}
+
+func updateOrchestraHandler() plugin.ToolHandler {
+	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
+		latest := checkLatestVersion()
+		if latest == "" {
+			return &pluginv1.ToolResponse{
+				Success:   false,
+				ErrorCode: "update_check_failed",
+				Result: mustStruct(map[string]any{
+					"error": "Could not reach GitHub API. Download manually: https://github.com/" + githubRepo + "/releases",
+				}),
+			}, nil
+		}
+
+		if !isNewerVersion(Version, latest) {
+			return &pluginv1.ToolResponse{
+				Success: true,
+				Result: mustStruct(map[string]any{
+					"message": fmt.Sprintf("Orchestra is already up to date (%s). No update needed.", Version),
+				}),
+			}, nil
+		}
+
+		if err := selfUpdate(latest); err != nil {
+			return &pluginv1.ToolResponse{
+				Success:   false,
+				ErrorCode: "update_failed",
+				Result: mustStruct(map[string]any{
+					"error": fmt.Sprintf("Update failed: %v", err),
+				}),
+			}, nil
+		}
+
+		return &pluginv1.ToolResponse{
+			Success: true,
+			Result: mustStruct(map[string]any{
+				"previous_version": Version,
+				"new_version":      latest,
+				"message":          fmt.Sprintf("Orchestra updated from %s to %s. Please ask the user to restart their IDE for the new version to take effect.", Version, latest),
+				"restart_required": true,
+			}),
+		}, nil
+	}
+}
+
+// mustStruct creates a structpb.Struct from a map, panicking on error (safe for
+// known-good maps of primitives).
+func mustStruct(m map[string]any) *structpb.Struct {
+	s, _ := structpb.NewStruct(m)
+	return s
+}
+
+// backgroundVersionCheck runs a single GitHub API check on startup and logs
+// the result. This makes the update advisory visible in the log file without
+// blocking the stdio transport.
+func backgroundVersionCheck() {
+	latest := checkLatestVersion()
+	if latest == "" {
+		return
+	}
+	if isNewerVersion(Version, latest) {
+		log.Printf("[update] new version available: %s (current: %s) — use check_update / update_orchestra MCP tools or run 'orchestra update'", latest, Version)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"runtime"
 	"sort"
@@ -143,6 +144,9 @@ func spawnPlugin(
 		binaryPath += ".exe"
 	}
 	cmd := exec.CommandContext(pluginCtx, binaryPath, args...)
+
+	// Propagate the orchestra workspace so child plugins know the project root.
+	cmd.Env = append(os.Environ(), "ORCHESTRA_WORKSPACE="+os.Getenv("ORCHESTRA_WORKSPACE"))
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
