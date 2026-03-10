@@ -5,25 +5,36 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
+	"github.com/orchestra-mcp/sdk-go/globaldb"
 	"github.com/orchestra-mcp/sdk-go/plugin"
 )
 
-// TCPServer listens for desktop app connections (Swift, Windows, Linux) using
-// the same length-delimited Protobuf protocol as the orchestrator's TCP bridge.
-// Each TCP connection handles one request/response pair.
+// TCPServer listens for desktop app connections (Swift, Windows, Linux) and
+// proxy connections from other orchestra serve instances. Uses the same
+// length-delimited Protobuf protocol as the orchestrator's TCP bridge.
+// Each TCP connection is persistent — multiple requests can be sent over a
+// single connection (the connection stays open until the client disconnects).
 type TCPServer struct {
 	addr     string
 	router   *Router
 	listener net.Listener
+
+	// sessionsMu protects activeSessions.
+	sessionsMu sync.Mutex
+	// activeSessions tracks session IDs per TCP connection so we can release
+	// session locks when the connection closes.
+	activeSessions map[net.Conn]string
 }
 
 // NewTCPServer creates a TCP server bound to the given address.
 func NewTCPServer(addr string, router *Router) *TCPServer {
 	return &TCPServer{
-		addr:   addr,
-		router: router,
+		addr:           addr,
+		router:         router,
+		activeSessions: make(map[net.Conn]string),
 	}
 }
 
@@ -63,33 +74,55 @@ func (s *TCPServer) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-// handleConn reads a single PluginRequest. If it's a StreamStart, the
-// connection is handed off to handleStreamConn for persistent streaming.
-// Otherwise it dispatches a single request/response pair via the router.
+// handleConn reads PluginRequests in a loop until the client disconnects.
+// If a StreamStart request arrives, the connection is handed off to
+// handleStreamConn. Session IDs are tracked so that session locks can be
+// released when the connection closes.
 func (s *TCPServer) handleConn(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+	defer func() {
+		conn.Close()
+		// Release session locks for this connection.
+		s.sessionsMu.Lock()
+		sessionID := s.activeSessions[conn]
+		delete(s.activeSessions, conn)
+		s.sessionsMu.Unlock()
+		if sessionID != "" {
+			log.Printf("[inprocess] tcp session %s disconnected — releasing locks", sessionID)
+			globaldb.ReleaseSessionLocks(sessionID)
+		}
+	}()
 
-	var req pluginv1.PluginRequest
-	if err := plugin.ReadMessage(conn, &req); err != nil {
-		log.Printf("[inprocess] tcp read: %v", err)
-		return
-	}
+	for {
+		var req pluginv1.PluginRequest
+		if err := plugin.ReadMessage(conn, &req); err != nil {
+			// EOF or read error — client disconnected.
+			return
+		}
 
-	// Streaming request — keep connection alive for multiple chunks.
-	if ss := req.GetStreamStart(); ss != nil {
-		s.handleStreamConn(ctx, conn, &req, ss)
-		return
-	}
+		// Streaming request — takes over the connection.
+		if ss := req.GetStreamStart(); ss != nil {
+			s.handleStreamConn(ctx, conn, &req, ss)
+			return
+		}
 
-	resp, err := s.router.Send(ctx, &req)
-	if err != nil {
-		log.Printf("[inprocess] tcp dispatch: %v", err)
-		return
-	}
-	resp.RequestId = req.GetRequestId()
+		// Track session ID from tool calls for disconnect cleanup.
+		if tc := req.GetToolCall(); tc != nil && tc.GetSessionId() != "" {
+			s.sessionsMu.Lock()
+			s.activeSessions[conn] = tc.GetSessionId()
+			s.sessionsMu.Unlock()
+		}
 
-	if err := plugin.WriteMessage(conn, resp); err != nil {
-		log.Printf("[inprocess] tcp write: %v", err)
+		resp, err := s.router.Send(ctx, &req)
+		if err != nil {
+			log.Printf("[inprocess] tcp dispatch: %v", err)
+			continue
+		}
+		resp.RequestId = req.GetRequestId()
+
+		if err := plugin.WriteMessage(conn, resp); err != nil {
+			log.Printf("[inprocess] tcp write: %v", err)
+			return
+		}
 	}
 }
 

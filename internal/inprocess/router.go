@@ -147,6 +147,8 @@ func (r *Router) RegisterPlugin(ep *plugin.ExportedPlugin) {
 }
 
 // RegisterExternal adds an external QUIC-connected plugin to the router.
+// External plugins override in-process handlers for same-named tools,
+// allowing installable plugins to supersede bundled core tool definitions.
 func (r *Router) RegisterExternal(ep *ExternalPlugin) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -161,6 +163,12 @@ func (r *Router) RegisterExternal(ep *ExternalPlugin) {
 				r.aiToolDefs[provider][def.Name] = def
 			}
 		} else {
+			// Remove any in-process handler for this tool so the external
+			// plugin takes priority via routeToolCall's fallback path.
+			if _, exists := r.toolHandlers[def.Name]; exists {
+				delete(r.toolHandlers, def.Name)
+				log.Printf("[inprocess] external plugin %q overrides in-process tool %q", ep.ID, def.Name)
+			}
 			r.toolDefs[def.Name] = def
 		}
 	}
@@ -375,12 +383,13 @@ func (r *Router) listTools(_ context.Context) (*pluginv1.PluginResponse, error) 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	seen := make(map[string]bool)
 	var tools []*pluginv1.ToolDefinition
 	for _, def := range r.toolDefs {
 		tools = append(tools, def)
+		seen[def.Name] = true
 	}
 	// Include AI tool defs from all providers.
-	seen := make(map[string]bool)
 	for _, providerDefs := range r.aiToolDefs {
 		for _, def := range providerDefs {
 			if !seen[def.Name] {
@@ -389,7 +398,7 @@ func (r *Router) listTools(_ context.Context) (*pluginv1.PluginResponse, error) 
 			}
 		}
 	}
-	// Include external plugin tools.
+	// Include external plugin tools not already in toolDefs.
 	for _, ep := range r.external {
 		for _, def := range ep.ToolDefs {
 			if !seen[def.Name] {

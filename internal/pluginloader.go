@@ -110,9 +110,9 @@ func loadExternalPlugins(
 			entry.ID, len(toolDefs), proc.Addr)
 	}
 
-	// Start background health checks.
+	// Start background health checks with auto-restart.
 	if len(processes) > 0 {
-		go healthCheckLoop(ctx, processes)
+		go healthCheckLoop(ctx, processes, router, certsDir, orchestratorAddr)
 	}
 
 	return processes, cleanups
@@ -293,10 +293,19 @@ func shutdownExternalPlugins(processes []*ExternalProcess, cleanups []func()) {
 	}
 }
 
-// healthCheckLoop periodically pings external plugins and logs unhealthy ones.
-func healthCheckLoop(ctx context.Context, processes []*ExternalProcess) {
+// healthCheckLoop periodically pings external plugins and restarts crashed ones.
+func healthCheckLoop(
+	ctx context.Context,
+	processes []*ExternalProcess,
+	router *inprocess.Router,
+	certsDir string,
+	orchestratorAddr string,
+) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+
+	// Track consecutive failures per plugin for restart logic.
+	failures := make(map[string]int)
 
 	for {
 		select {
@@ -315,9 +324,84 @@ func healthCheckLoop(ctx context.Context, processes []*ExternalProcess) {
 				})
 				cancel()
 				if err != nil {
-					log.Printf("[pluginloader] health check failed for %s: %v", proc.Entry.ID, err)
+					failures[proc.Entry.ID]++
+					if failures[proc.Entry.ID] >= 2 {
+						log.Printf("[pluginloader] %s unresponsive (%d failures), restarting...",
+							proc.Entry.ID, failures[proc.Entry.ID])
+						if restartErr := restartPlugin(ctx, proc, router, certsDir, orchestratorAddr); restartErr != nil {
+							log.Printf("[pluginloader] restart %s failed: %v", proc.Entry.ID, restartErr)
+						} else {
+							log.Printf("[pluginloader] %s restarted successfully (addr: %s)", proc.Entry.ID, proc.Addr)
+							failures[proc.Entry.ID] = 0
+						}
+					} else {
+						log.Printf("[pluginloader] health check failed for %s: %v", proc.Entry.ID, err)
+					}
+				} else {
+					failures[proc.Entry.ID] = 0
 				}
 			}
 		}
 	}
+}
+
+// restartPlugin kills the old process, spawns a new one, reconnects QUIC,
+// fetches tool defs, and re-registers on the router.
+func restartPlugin(
+	ctx context.Context,
+	proc *ExternalProcess,
+	router *inprocess.Router,
+	certsDir string,
+	orchestratorAddr string,
+) error {
+	// Kill old process.
+	if proc.Client != nil {
+		proc.Client.Close()
+	}
+	proc.Cancel()
+
+	// Spawn fresh.
+	newProc, err := spawnPlugin(ctx, proc.Entry, certsDir, orchestratorAddr)
+	if err != nil {
+		return fmt.Errorf("spawn: %w", err)
+	}
+
+	// Connect QUIC.
+	clientTLS, err := inprocess.ClientTLSConfigForBridge(certsDir)
+	if err != nil {
+		newProc.Cancel()
+		return fmt.Errorf("TLS config: %w", err)
+	}
+
+	client, err := sdkplugin.NewOrchestratorClient(ctx, newProc.Addr, clientTLS)
+	if err != nil {
+		newProc.Cancel()
+		return fmt.Errorf("QUIC connect: %w", err)
+	}
+
+	// Fetch defs.
+	toolDefs, promptDefs, err := fetchPluginDefs(ctx, client)
+	if err != nil {
+		client.Close()
+		newProc.Cancel()
+		return fmt.Errorf("fetch defs: %w", err)
+	}
+
+	// Re-register on router (overwrites old entry).
+	ep := &inprocess.ExternalPlugin{
+		ID:         proc.Entry.ID,
+		ProvidesAI: proc.Entry.ProvidesAI,
+		ToolDefs:   toolDefs,
+		PromptDefs: promptDefs,
+		Client:     client,
+	}
+	router.RegisterExternal(ep)
+
+	// Update proc in-place so health checks use the new client.
+	proc.Cmd = newProc.Cmd
+	proc.Addr = newProc.Addr
+	proc.Client = client
+	proc.Cancel = newProc.Cancel
+
+	return nil
 }
