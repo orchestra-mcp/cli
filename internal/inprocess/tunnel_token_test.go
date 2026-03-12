@@ -12,7 +12,7 @@ import (
 
 func TestTunnelTokenGenerate(t *testing.T) {
 	m := NewTunnelTokenManager()
-	raw, err := m.GenerateToken("localhost:9201", "my-key", "", 42)
+	raw, err := m.GenerateToken("localhost:9201", "my-key", "", "", 42)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestTunnelTokenGenerate(t *testing.T) {
 
 func TestTunnelTokenVerifySuccess(t *testing.T) {
 	m := NewTunnelTokenManager()
-	raw, err := m.GenerateToken("localhost:9201", "my-key", "", 42)
+	raw, err := m.GenerateToken("localhost:9201", "my-key", "", "", 42)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestTunnelTokenVerifySuccess(t *testing.T) {
 
 func TestTunnelTokenOneTimeUse(t *testing.T) {
 	m := NewTunnelTokenManager()
-	raw, _ := m.GenerateToken("localhost:9201", "", "", 10)
+	raw, _ := m.GenerateToken("localhost:9201", "", "", "", 10)
 
 	// First verify succeeds.
 	if _, err := m.VerifyToken(raw); err != nil {
@@ -80,7 +80,7 @@ func TestTunnelTokenOneTimeUse(t *testing.T) {
 
 func TestTunnelTokenInvalid(t *testing.T) {
 	m := NewTunnelTokenManager()
-	m.GenerateToken("localhost:9201", "", "", 10)
+	m.GenerateToken("localhost:9201", "", "", "", 10)
 
 	// Wrong token.
 	if _, err := m.VerifyToken("wrong-token"); err == nil {
@@ -102,7 +102,7 @@ func TestTunnelTokenNoPending(t *testing.T) {
 
 func TestTunnelTokenRevoke(t *testing.T) {
 	m := NewTunnelTokenManager()
-	raw, _ := m.GenerateToken("localhost:9201", "", "", 10)
+	raw, _ := m.GenerateToken("localhost:9201", "", "", "", 10)
 
 	m.RevokeToken()
 
@@ -116,8 +116,8 @@ func TestTunnelTokenRevoke(t *testing.T) {
 
 func TestTunnelTokenRegenerate(t *testing.T) {
 	m := NewTunnelTokenManager()
-	raw1, _ := m.GenerateToken("localhost:9201", "", "", 10)
-	raw2, _ := m.GenerateToken("localhost:9202", "", "", 20)
+	raw1, _ := m.GenerateToken("localhost:9201", "", "", "", 10)
+	raw2, _ := m.GenerateToken("localhost:9202", "", "", "", 20)
 
 	if raw1 == raw2 {
 		t.Fatal("expected different tokens on regenerate")
@@ -140,7 +140,7 @@ func TestTunnelTokenRegenerate(t *testing.T) {
 
 func TestTunnelTokenNoAuth(t *testing.T) {
 	m := NewTunnelTokenManager()
-	raw, _ := m.GenerateToken("localhost:9201", "", "", 10)
+	raw, _ := m.GenerateToken("localhost:9201", "", "", "", 10)
 
 	token, _ := m.VerifyToken(raw)
 	if token.APIKeyHash != "" {
@@ -152,7 +152,7 @@ func TestTunnelTokenNoAuth(t *testing.T) {
 
 func TestDecodeToken(t *testing.T) {
 	m := NewTunnelTokenManager()
-	raw, _ := m.GenerateToken("localhost:9201", "key123", "", 5)
+	raw, _ := m.GenerateToken("localhost:9201", "key123", "", "", 5)
 
 	token, err := DecodeToken(raw)
 	if err != nil {
@@ -235,7 +235,7 @@ func TestFormatTokenDisplayNoAuth(t *testing.T) {
 func registerTestServer(t *testing.T, apiKey string) (*httptest.Server, *WebGateServer) {
 	t.Helper()
 	router := testRouter()
-	wg := NewWebGateServer(router, apiKey, "", nil)
+	wg := NewWebGateServer(router, apiKey, "", "", nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", wg.handleUpgrade)
@@ -373,7 +373,7 @@ func TestRegisterEndpointInvalidJSON(t *testing.T) {
 
 func TestGenerateRegistrationToken(t *testing.T) {
 	router := testRouter()
-	wg := NewWebGateServer(router, "test-key", "", nil)
+	wg := NewWebGateServer(router, "test-key", "", "", nil)
 
 	raw, token, err := wg.GenerateRegistrationToken()
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
 	"net/http"
@@ -26,8 +27,11 @@ import (
 	// ----------------------------------------------------------------
 	storagemarkdown "github.com/orchestra-mcp/plugin-storage-markdown"
 	storagesqlite "github.com/orchestra-mcp/plugin-storage-sqlite"
+	synccloud "github.com/orchestra-mcp/plugin-sync-cloud"
+	toolsdocs "github.com/orchestra-mcp/plugin-tools-docs"
 	toolsfeatures "github.com/orchestra-mcp/plugin-tools-features"
 	toolsmarketplace "github.com/orchestra-mcp/plugin-tools-marketplace"
+	toolsnotes "github.com/orchestra-mcp/plugin-tools-notes"
 	transportstdio "github.com/orchestra-mcp/plugin-transport-stdio"
 )
 
@@ -43,7 +47,7 @@ type instanceInfo struct {
 func RunServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	workspace := fs.String("workspace", ".", "Project workspace directory")
-	tcpAddr := fs.String("tcp-addr", "localhost:50101", "TCP address for desktop app connections")
+	tcpAddr := fs.String("tcp-addr", "", "TCP address for desktop app connections (default: auto-assigned per workspace)")
 	webGateAddr := fs.String("web-gate", envOrDefault("ORCHESTRA_WEB_GATE", ":9201"), "WebSocket gateway address for browser clients (default :9201)")
 	webGateKey := fs.String("web-gate-key", envOrDefault("ORCHESTRA_WEB_GATE_KEY", ""), "API key for web-gate authentication (empty = no auth)")
 	webGateCORS := fs.String("web-gate-cors", envOrDefault("ORCHESTRA_WEB_GATE_CORS", ""), "Comma-separated CORS origins for web-gate (empty = allow all)")
@@ -174,6 +178,27 @@ func RunServe(args []string) {
 		toolsmarketplace.Register(b, router, absWorkspace)
 	})
 
+	initStoragePlugin(router, "tools.notes", func(b *plugin.PluginBuilder) {
+		toolsnotes.Register(b, router)
+	})
+
+	initStoragePlugin(router, "tools.docs", func(b *plugin.PluginBuilder) {
+		toolsdocs.Register(b, router, absWorkspace)
+	})
+
+	// 1c. Sync-cloud plugin (data sync to cloud dashboard)
+	var syncNow synccloud.SyncNowFunc
+	var syncSetAuth synccloud.SetAuthFunc
+	var syncCleanup synccloud.Cleanup
+	initStoragePlugin(router, "sync.cloud", func(b *plugin.PluginBuilder) {
+		syncCleanup, syncNow, syncSetAuth = synccloud.Register(b, router)
+	})
+	defer func() {
+		if syncCleanup != nil {
+			syncCleanup()
+		}
+	}()
+
 	// ================================================================
 	// PHASE 2: EXTERNAL PLUGINS (from ~/.orchestra/plugins/registry.json)
 	// ================================================================
@@ -225,7 +250,7 @@ func RunServe(args []string) {
 				}
 			}
 		}
-		webGate := inprocess.NewWebGateServer(router, *webGateKey, *cloudURL, corsOrigins)
+		webGate := inprocess.NewWebGateServer(router, *webGateKey, *cloudURL, absWorkspace, corsOrigins)
 		go func() {
 			if err := webGate.ListenAndServe(ctx, *webGateAddr); err != nil {
 				log.Printf("[serve] web-gate error: %v", err)
@@ -248,22 +273,54 @@ func RunServe(args []string) {
 		// 2. On success, establish persistent reverse WebSocket to cloud
 		if *cloudURL != "" && token != nil {
 			go func() {
+				inprocess.TunnelLog(33, "Waiting for registration at %s ...", *cloudURL)
 				log.Printf("[serve] waiting for tunnel registration at %s ...", *cloudURL)
-				tunnelID, connToken, err := inprocess.ClaimTunnel(ctx, *cloudURL, token.Nonce)
+				tunnelID, connToken, teamID, authToken, err := inprocess.ClaimTunnel(ctx, *cloudURL, token.Nonce)
 				if err != nil {
+					inprocess.TunnelLog(31, "Claim failed: %v", err)
 					log.Printf("[serve] tunnel claim failed: %v", err)
 					return
 				}
+				inprocess.TunnelLog(32, "Claimed: %s", tunnelID)
 				log.Printf("[serve] tunnel claimed: %s — starting reverse connection", tunnelID)
 
+				// Configure sync engine with tunnel context credentials.
+				if syncSetAuth != nil && authToken != "" {
+					syncSetAuth(authToken, teamID, tunnelID, tunnelID)
+					log.Printf("[serve] sync-cloud configured for tunnel %s (team %s)", tunnelID, teamID)
+				}
+
+				inprocess.TunnelLog(32, "Starting reverse connection to %s ...", *cloudURL)
+
 				rt := inprocess.NewReverseTunnelClient(*cloudURL, tunnelID, connToken, router)
+				rt.OnConnect = func(ctx context.Context) {
+					if syncNow == nil {
+						return
+					}
+					inprocess.TunnelLog(33, "Syncing data to cloud ...")
+					applied, _, errs, err := syncNow(ctx)
+					if err != nil {
+						inprocess.TunnelLog(31, "Sync failed: %v", err)
+					} else if applied > 0 || errs > 0 {
+						inprocess.TunnelLog(32, "Synced: %d applied, %d errors", applied, errs)
+					} else {
+						inprocess.TunnelLog(32, "Sync: up to date")
+					}
+				}
 				rt.ReconnectLoop(ctx)
 			}()
 		}
 	}
 
+	// Resolve TCP address: if not explicitly set, derive a deterministic port
+	// from the workspace path so each workspace gets its own port.
+	resolvedTCPAddr := *tcpAddr
+	if resolvedTCPAddr == "" {
+		resolvedTCPAddr = fmt.Sprintf("localhost:%d", workspaceTCPPort(absWorkspace))
+	}
+
 	// TCP server for desktop app connections (Swift, Windows, Linux).
-	tcpServer := inprocess.NewTCPServer(*tcpAddr, router)
+	tcpServer := inprocess.NewTCPServer(resolvedTCPAddr, router)
 	go func() {
 		if err := tcpServer.ListenAndServe(ctx); err != nil {
 			log.Printf("[serve] TCP server error: %v", err)
@@ -271,7 +328,7 @@ func RunServe(args []string) {
 	}()
 
 	toolCount := len(router.ListToolNames())
-	coreCount := 3 // storage.markdown + tools.features + tools.marketplace
+	coreCount := 5 // storage + tools.features + tools.marketplace + tools.notes + tools.docs
 	extCount := len(externalProcesses)
 	log.Printf("[serve] ready — %d tools from %d core + %d external plugins", toolCount, coreCount, extCount)
 
@@ -686,4 +743,13 @@ func workspaceSlug(absPath string) string {
 		slug = "default"
 	}
 	return slug
+}
+
+// workspaceTCPPort derives a deterministic TCP port from the workspace path.
+// Uses a hash of the absolute path mapped to the range 50101–50999, giving
+// each workspace a stable port that won't collide with other workspaces.
+func workspaceTCPPort(absWorkspace string) int {
+	h := fnv.New32a()
+	h.Write([]byte(absWorkspace))
+	return 50101 + int(h.Sum32()%899) // range: 50101–50999
 }

@@ -23,6 +23,9 @@ const (
 type claimResponse struct {
 	TunnelID        string `json:"tunnel_id"`
 	ConnectionToken string `json:"connection_token"`
+	TeamID          string `json:"team_id"`
+	AuthToken       string `json:"auth_token"`
+	Workspace       string `json:"workspace"`
 }
 
 // ClaimTunnel polls the cloud server's claim endpoint until the user registers
@@ -32,7 +35,7 @@ type claimResponse struct {
 // The nonce is the secret from the registration token that the CLI generated.
 // The cloud server stores a nonce→credentials mapping when the user pastes the
 // token in the web app.
-func ClaimTunnel(ctx context.Context, cloudURL, nonce string) (tunnelID, connectionToken string, err error) {
+func ClaimTunnel(ctx context.Context, cloudURL, nonce string) (tunnelID, connectionToken, teamID, authToken string, err error) {
 	claimURL := fmt.Sprintf("%s/api/tunnels/claim", cloudURL)
 	body, _ := json.Marshal(map[string]string{"nonce": nonce})
 
@@ -42,17 +45,17 @@ func ClaimTunnel(ctx context.Context, cloudURL, nonce string) (tunnelID, connect
 	for {
 		select {
 		case <-ctx.Done():
-			return "", "", ctx.Err()
+			return "", "", "", "", ctx.Err()
 		default:
 		}
 
 		if time.Now().After(deadline) {
-			return "", "", fmt.Errorf("claim timed out after %s — token was not registered in the web app", claimTimeout)
+			return "", "", "", "", fmt.Errorf("claim timed out after %s — token was not registered in the web app", claimTimeout)
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, claimURL, bytes.NewReader(body))
 		if err != nil {
-			return "", "", fmt.Errorf("create request: %w", err)
+			return "", "", "", "", fmt.Errorf("create request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
 
@@ -71,9 +74,9 @@ func ClaimTunnel(ctx context.Context, cloudURL, nonce string) (tunnelID, connect
 		case http.StatusOK:
 			var result claimResponse
 			if err := json.Unmarshal(respBody, &result); err != nil {
-				return "", "", fmt.Errorf("parse claim response: %w", err)
+				return "", "", "", "", fmt.Errorf("parse claim response: %w", err)
 			}
-			return result.TunnelID, result.ConnectionToken, nil
+			return result.TunnelID, result.ConnectionToken, result.TeamID, result.AuthToken, nil
 
 		case http.StatusNotFound:
 			// Not registered yet — keep polling.
@@ -81,10 +84,10 @@ func ClaimTunnel(ctx context.Context, cloudURL, nonce string) (tunnelID, connect
 			continue
 
 		case http.StatusGone:
-			return "", "", fmt.Errorf("claim expired — generate a new token")
+			return "", "", "", "", fmt.Errorf("claim expired — generate a new token")
 
 		default:
-			return "", "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
+			return "", "", "", "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
 		}
 	}
 }

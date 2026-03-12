@@ -71,7 +71,7 @@ func testRouter() *Router {
 func wgTestServer(t *testing.T, apiKey string, corsOrigins []string) (*httptest.Server, *WebGateServer) {
 	t.Helper()
 	router := testRouter()
-	wg := NewWebGateServer(router, apiKey, "", corsOrigins)
+	wg := NewWebGateServer(router, apiKey, "", "", corsOrigins)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", wg.handleUpgrade)
@@ -542,7 +542,7 @@ func TestWebGateCORSRestricted(t *testing.T) {
 }
 
 func TestWebGateCheckOrigin(t *testing.T) {
-	wg := NewWebGateServer(NewRouter(), "", "", nil)
+	wg := NewWebGateServer(NewRouter(), "", "", "", nil)
 
 	// No origins configured — allow all.
 	req := httptest.NewRequest("GET", "/ws", nil)
@@ -613,7 +613,7 @@ func TestWebGateExternalPluginContextNotCanceled(t *testing.T) {
 		},
 	})
 
-	wg := NewWebGateServer(router, "", "", nil)
+	wg := NewWebGateServer(router, "", "", "", nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", wg.handleUpgrade)
 	ts := httptest.NewServer(wg.corsMiddleware(mux))

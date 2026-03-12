@@ -31,6 +31,7 @@ type WebGateServer struct {
 	router       *Router
 	apiKey       string   // optional (empty = no auth)
 	cloudURL     string   // cloud server URL for reverse tunnel (empty = disabled)
+	workspace    string   // absolute workspace path
 	corsOrigins  []string // allowed origins (empty = allow all)
 	upgrader     websocket.Upgrader
 	server       *http.Server
@@ -48,12 +49,13 @@ type WebGateServer struct {
 // NewWebGateServer creates a WebGateServer. If apiKey is empty, authentication
 // is disabled. corsOrigins controls which browser origins can connect (empty =
 // allow all).
-func NewWebGateServer(router *Router, apiKey, cloudURL string, corsOrigins []string) *WebGateServer {
+func NewWebGateServer(router *Router, apiKey, cloudURL, workspace string, corsOrigins []string) *WebGateServer {
 	ctx, cancel := context.WithCancel(context.Background())
 	wg := &WebGateServer{
 		router:       router,
 		apiKey:       apiKey,
 		cloudURL:     cloudURL,
+		workspace:    workspace,
 		corsOrigins:  corsOrigins,
 		tokenManager: NewTunnelTokenManager(),
 		ctx:          ctx,
@@ -138,7 +140,7 @@ func (wg *WebGateServer) TokenManager() *TunnelTokenManager {
 func (wg *WebGateServer) GenerateRegistrationToken() (string, *TunnelToken, error) {
 	addr := wg.Addr()
 	toolCount := len(wg.router.ListToolNames())
-	raw, err := wg.tokenManager.GenerateToken(addr, wg.apiKey, wg.cloudURL, toolCount)
+	raw, err := wg.tokenManager.GenerateToken(addr, wg.apiKey, wg.cloudURL, wg.workspace, toolCount)
 	if err != nil {
 		return "", nil, err
 	}

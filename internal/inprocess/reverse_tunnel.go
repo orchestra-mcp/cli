@@ -7,7 +7,9 @@ import (
 	"log"
 	"math/rand"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,6 +29,17 @@ const (
 	reverseWriteTimeout = 10 * time.Second
 )
 
+// TunnelLog writes a synchronized, newline-terminated log line to stderr.
+// Color codes: 32=green, 33=yellow, 31=red, 36=cyan.
+var tunnelLogMu sync.Mutex
+
+func TunnelLog(color int, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	tunnelLogMu.Lock()
+	fmt.Fprintf(os.Stderr, "  \033[%dm[TUNNEL]\033[0m %s\n", color, msg)
+	tunnelLogMu.Unlock()
+}
+
 // relayEnvelope is the message format on the reverse tunnel WebSocket.
 // The cloud wraps browser requests with relay_to, and the local machine
 // echoes it back so the cloud can route responses to the correct browser.
@@ -45,6 +58,7 @@ type ReverseTunnelClient struct {
 	tunnelID        string
 	connectionToken string
 	router          *Router
+	OnConnect       func(ctx context.Context) // called after each successful connect
 }
 
 // NewReverseTunnelClient creates a new reverse tunnel client.
@@ -71,12 +85,15 @@ func (rt *ReverseTunnelClient) ReconnectLoop(ctx context.Context) {
 
 		err := rt.connect(ctx)
 		if ctx.Err() != nil {
+			TunnelLog(33, "Disconnected (shutting down)")
 			return // Context cancelled — clean shutdown.
 		}
 
 		if err != nil {
+			TunnelLog(31, "Disconnected: %v (reconnecting in %s)", err, backoff)
 			log.Printf("[reverse-tunnel] disconnected: %v (reconnecting in %s)", err, backoff)
 		} else {
+			TunnelLog(33, "Disconnected (reconnecting in %s)", backoff)
 			log.Printf("[reverse-tunnel] disconnected (reconnecting in %s)", backoff)
 		}
 
@@ -100,6 +117,7 @@ func (rt *ReverseTunnelClient) ReconnectLoop(ctx context.Context) {
 // Returns when the connection closes or an error occurs.
 func (rt *ReverseTunnelClient) connect(ctx context.Context) error {
 	wsURL := rt.buildURL()
+	TunnelLog(33, "Connecting to %s ...", rt.cloudURL)
 	log.Printf("[reverse-tunnel] connecting to %s", rt.cloudURL)
 
 	dialer := websocket.Dialer{
@@ -108,11 +126,18 @@ func (rt *ReverseTunnelClient) connect(ctx context.Context) error {
 
 	conn, _, err := dialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
+		TunnelLog(31, "Connection failed: %v", err)
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
 
+	TunnelLog(32, "Connected (tunnel %s)", rt.tunnelID)
 	log.Printf("[reverse-tunnel] connected to %s (tunnel %s)", rt.cloudURL, rt.tunnelID)
+
+	// Fire OnConnect callback in background so it doesn't block relay.
+	if rt.OnConnect != nil {
+		go rt.OnConnect(ctx)
+	}
 
 	// Reset backoff on successful connection (caller handles this via the loop).
 	conn.SetReadLimit(1024 * 1024) // 1MB max message
@@ -281,6 +306,8 @@ func (rt *ReverseTunnelClient) handleToolsCall(ctx context.Context, req *protoco
 	if params.Name == "" {
 		return rtErrResp(req.ID, protocol.InvalidParams, "missing required parameter: name")
 	}
+
+	TunnelLog(36, "← tools/call %s", params.Name)
 
 	var args *structpb.Struct
 	if params.Arguments != nil {

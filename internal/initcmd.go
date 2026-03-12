@@ -7,6 +7,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	storagesqlite "github.com/orchestra-mcp/plugin-storage-sqlite"
+	"github.com/orchestra-mcp/sdk-go/helpers"
 )
 
 func RunInit(args []string) {
@@ -82,12 +85,20 @@ func RunInit(args []string) {
 		fmt.Fprintf(os.Stderr, "  [OK] %s → %s\n", ide.Display, displayPath)
 	}
 
-	// Create .projects/ directory.
+	// Create .projects/ directory and bootstrap project in SQLite.
 	projectsDir := filepath.Join(absWorkspace, ".projects")
 	if err := os.MkdirAll(projectsDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "\n  [WARN] Could not create .projects/: %v\n", err)
 	} else {
 		fmt.Fprintf(os.Stderr, "\n  [OK] .projects/ directory ready\n")
+	}
+
+	// Bootstrap project record in SQLite so features can be created immediately.
+	slug := helpers.Slugify(projectName)
+	if err := storagesqlite.BootstrapProject(absWorkspace, slug, projectName); err != nil {
+		fmt.Fprintf(os.Stderr, "  [WARN] Could not bootstrap project in database: %v\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "  [OK] Project %q (%s) created in database\n", projectName, slug)
 	}
 
 	// Install bundled skill + agent (project-manager, orchestra).

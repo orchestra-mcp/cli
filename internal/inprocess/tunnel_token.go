@@ -40,7 +40,8 @@ type TunnelToken struct {
 
 	// Metadata
 	ToolCount int    `json:"tool_count"`
-	CreatedAt string `json:"created_at"` // ISO 8601
+	CreatedAt string `json:"created_at"`            // ISO 8601
+	Workspace string `json:"workspace,omitempty"`   // absolute workspace path (for multi-workspace tunnels)
 }
 
 // TunnelTokenManager handles token generation, storage, and one-time verification.
@@ -57,7 +58,7 @@ func NewTunnelTokenManager() *TunnelTokenManager {
 
 // GenerateToken creates a new registration token with machine metadata.
 // Only one token is active at a time — generating a new one invalidates the previous.
-func (m *TunnelTokenManager) GenerateToken(gateAddress, apiKey, cloudURL string, toolCount int) (string, error) {
+func (m *TunnelTokenManager) GenerateToken(gateAddress, apiKey, cloudURL, workspace string, toolCount int) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -87,6 +88,7 @@ func (m *TunnelTokenManager) GenerateToken(gateAddress, apiKey, cloudURL string,
 		ToolCount:   toolCount,
 		Nonce:       hex.EncodeToString(nonce),
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		Workspace:   workspace,
 	}
 
 	// Hash the API key if provided (never store the key itself in the token).
@@ -220,6 +222,9 @@ func FormatTokenDisplay(raw string, token *TunnelToken) string {
 	b.WriteString(fmt.Sprintf("  Gate:      %s\r\n", token.GateAddress))
 	b.WriteString(fmt.Sprintf("  Tools:     %d\r\n", token.ToolCount))
 	b.WriteString(fmt.Sprintf("  Auth:      %s\r\n", auth))
+	if token.Workspace != "" {
+		b.WriteString(fmt.Sprintf("  Workspace: %s\r\n", token.Workspace))
+	}
 	if token.CloudURL != "" {
 		b.WriteString(fmt.Sprintf("  Cloud:     %s\r\n", token.CloudURL))
 	}
