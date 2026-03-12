@@ -38,7 +38,7 @@ func NewTCPServer(addr string, router *Router) *TCPServer {
 	}
 }
 
-// Addr returns the actual listening address. Only valid after ListenAndServe.
+// Addr returns the actual listening address. Only valid after Listen.
 func (s *TCPServer) Addr() string {
 	if s.listener != nil {
 		return s.listener.Addr().String()
@@ -46,24 +46,32 @@ func (s *TCPServer) Addr() string {
 	return s.addr
 }
 
-// ListenAndServe starts the TCP listener and processes connections until the
-// context is cancelled. Each connection receives one PluginRequest and gets
-// one PluginResponse back, using the SDK's length-delimited Protobuf framing.
-func (s *TCPServer) ListenAndServe(ctx context.Context) error {
+// Listen binds the TCP socket without accepting connections. Call Serve to
+// start processing. Splitting listen from serve lets the caller detect port
+// conflicts and fall back before committing.
+func (s *TCPServer) Listen() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("tcp listen %s: %w", s.addr, err)
 	}
 	s.listener = ln
 	log.Printf("[inprocess] TCP server listening on %s (for desktop apps)", ln.Addr().String())
+	return nil
+}
 
+// Serve accepts connections on the already-bound listener until the context
+// is cancelled. Must call Listen first.
+func (s *TCPServer) Serve(ctx context.Context) error {
+	if s.listener == nil {
+		return fmt.Errorf("tcp server: Listen not called")
+	}
 	go func() {
 		<-ctx.Done()
-		ln.Close()
+		s.listener.Close()
 	}()
 
 	for {
-		conn, err := ln.Accept()
+		conn, err := s.listener.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil // graceful shutdown
@@ -72,6 +80,14 @@ func (s *TCPServer) ListenAndServe(ctx context.Context) error {
 		}
 		go s.handleConn(ctx, conn)
 	}
+}
+
+// ListenAndServe binds and serves in one call (convenience wrapper).
+func (s *TCPServer) ListenAndServe(ctx context.Context) error {
+	if err := s.Listen(); err != nil {
+		return err
+	}
+	return s.Serve(ctx)
 }
 
 // handleConn reads PluginRequests in a loop until the client disconnects.

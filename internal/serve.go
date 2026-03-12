@@ -90,9 +90,15 @@ func RunServe(args []string) {
 			//   → Kill existing and start fresh (original behavior).
 			info, rerr := readInstanceInfo(infoFile)
 			if rerr != nil {
+				// .info file missing — derive TCP address from workspace (same
+				// logic the server uses when --tcp-addr is not explicitly set).
+				fallbackAddr := *tcpAddr
+				if fallbackAddr == "" {
+					fallbackAddr = fmt.Sprintf("localhost:%d", workspaceTCPPort(absWorkspace))
+				}
 				info = &instanceInfo{
 					PID:     readPIDFromFile(pidFile),
-					TCPAddr: *tcpAddr,
+					TCPAddr: fallbackAddr,
 				}
 			}
 			healthy := isInstanceHealthy(info.TCPAddr)
@@ -320,12 +326,31 @@ func RunServe(args []string) {
 	}
 
 	// TCP server for desktop app connections (Swift, Windows, Linux).
+	// If the preferred port is already in use (e.g. another session on the same
+	// workspace), fall back to a random port. TCP is optional — the stdio
+	// transport is the primary MCP channel.
 	tcpServer := inprocess.NewTCPServer(resolvedTCPAddr, router)
-	go func() {
-		if err := tcpServer.ListenAndServe(ctx); err != nil {
-			log.Printf("[serve] TCP server error: %v", err)
+	tcpRunning := false
+	if err := tcpServer.Listen(); err != nil {
+		// Port taken — try a random port so this session still has TCP for proxying.
+		log.Printf("[serve] TCP port %s in use, trying random port...", resolvedTCPAddr)
+		fallbackServer := inprocess.NewTCPServer("localhost:0", router)
+		if err2 := fallbackServer.Listen(); err2 != nil {
+			log.Printf("[serve] TCP server unavailable: %v (continuing without TCP)", err2)
+		} else {
+			tcpServer = fallbackServer
+			tcpRunning = true
 		}
-	}()
+	} else {
+		tcpRunning = true
+	}
+	if tcpRunning {
+		go func() {
+			if err := tcpServer.Serve(ctx); err != nil {
+				log.Printf("[serve] TCP server error: %v", err)
+			}
+		}()
+	}
 
 	toolCount := len(router.ListToolNames())
 	coreCount := 5 // storage + tools.features + tools.marketplace + tools.notes + tools.docs
