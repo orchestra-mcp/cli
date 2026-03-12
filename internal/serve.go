@@ -109,7 +109,7 @@ func RunServe(args []string) {
 					// MCP client (piped stdin) → proxy stdin/stdout to existing instance via TCP.
 					// No new server, no duplicate plugins — just a thin bridge.
 					fmt.Fprintf(os.Stderr, "orchestra: proxying to existing instance (pid %d, tcp %s)\n", info.PID, info.TCPAddr)
-					runProxyMode(info)
+					runProxyMode(info, infoFile)
 					return
 				}
 				// Interactive terminal: reuse existing instance (show web-gate token, block until ESC).
@@ -690,8 +690,8 @@ func runAttachedMode(info *instanceInfo, _ string, webGateKey string) {
 // instance via TCP. The StdioTransport handles JSON-RPC ↔ Protobuf conversion;
 // TCPSender forwards the Protobuf requests to the remote instance. When stdin
 // closes (IDE disconnects), the proxy exits but the server stays running.
-func runProxyMode(info *instanceInfo) {
-	sender, err := inprocess.NewTCPSender(info.TCPAddr)
+func runProxyMode(info *instanceInfo, infoFile string) {
+	sender, err := inprocess.NewTCPSender(info.TCPAddr, infoFile)
 	if err != nil {
 		fatal("connect to instance at %s: %v", info.TCPAddr, err)
 	}

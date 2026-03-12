@@ -2,9 +2,11 @@ package inprocess
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -13,9 +15,12 @@ import (
 )
 
 const (
-	reconnectAttempts = 3
-	reconnectDelay    = 1 * time.Second
-	dialTimeout       = 5 * time.Second
+	reconnectMaxAttempts = 10
+	reconnectBaseDelay   = 1 * time.Second
+	reconnectMaxDelay    = 10 * time.Second
+	dialTimeout          = 5 * time.Second
+	healthCheckInterval  = 10 * time.Second
+	healthCheckTimeout   = 3 * time.Second
 )
 
 // TCPSender implements the Sender interface by forwarding Protobuf requests to
@@ -25,27 +30,40 @@ const (
 // StdioTransport, bridging stdin/stdout ↔ TCP.
 //
 // If the connection drops (e.g. orchestrator restart), Send automatically
-// reconnects and retries the request.
+// reconnects with exponential backoff and retries the request. During reconnect,
+// the info file is re-read in case the primary restarted on a different port.
+// A background health check detects primary death and exits the proxy
+// process so the IDE can restart it as a new primary instance.
 type TCPSender struct {
-	addr string
-	conn net.Conn
-	mu   sync.Mutex // serializes Send calls (one request at a time)
+	addr     string
+	infoFile string // path to .info file — re-read on reconnect to discover new port
+	conn     net.Conn
+	mu       sync.Mutex // serializes Send calls (one request at a time)
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 // NewTCPSender connects to an existing orchestra instance's TCP server.
-func NewTCPSender(addr string) (*TCPSender, error) {
+// infoFile is the path to the instance's .info JSON file — it's re-read during
+// reconnection in case the primary restarted on a different port.
+// It starts a background health check that exits the process if the primary
+// instance becomes permanently unreachable.
+func NewTCPSender(addr, infoFile string) (*TCPSender, error) {
 	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", addr, err)
 	}
-	return &TCPSender{addr: addr, conn: conn}, nil
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &TCPSender{addr: addr, infoFile: infoFile, conn: conn, ctx: ctx, cancel: cancel}
+	go s.healthCheck()
+	return s, nil
 }
 
 // Send forwards a PluginRequest to the remote instance and reads the response.
 // It implements the Sender interface used by StdioTransport.
 //
 // On connection errors (broken pipe, connection reset, EOF), it automatically
-// reconnects and retries the request once.
+// reconnects with exponential backoff and retries the request.
 func (s *TCPSender) Send(ctx context.Context, req *pluginv1.PluginRequest) (*pluginv1.PluginResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -58,7 +76,7 @@ func (s *TCPSender) Send(ctx context.Context, req *pluginv1.PluginRequest) (*plu
 	// Connection is broken — try to reconnect and retry.
 	log.Printf("[proxy] send failed (%v), attempting reconnect to %s", err, s.addr)
 
-	if reconnErr := s.reconnect(); reconnErr != nil {
+	if reconnErr := s.reconnect(ctx); reconnErr != nil {
 		return nil, fmt.Errorf("send failed (%v) and reconnect failed: %w", err, reconnErr)
 	}
 
@@ -80,29 +98,107 @@ func (s *TCPSender) sendOnce(req *pluginv1.PluginRequest) (*pluginv1.PluginRespo
 	return &resp, nil
 }
 
+// refreshAddr re-reads the .info file to discover the current TCP address.
+// If the primary restarted on a different port, we pick up the new address.
+func (s *TCPSender) refreshAddr() {
+	if s.infoFile == "" {
+		return
+	}
+	data, err := os.ReadFile(s.infoFile)
+	if err != nil {
+		return
+	}
+	var info struct {
+		TCPAddr string `json:"tcp_addr"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		return
+	}
+	if info.TCPAddr != "" && info.TCPAddr != s.addr {
+		log.Printf("[proxy] primary address changed: %s → %s", s.addr, info.TCPAddr)
+		s.addr = info.TCPAddr
+	}
+}
+
 // reconnect closes the dead connection and dials a new one, retrying up to
-// reconnectAttempts times with reconnectDelay between attempts.
-func (s *TCPSender) reconnect() error {
+// reconnectMaxAttempts times with exponential backoff (1s, 2s, 4s, ... capped
+// at 10s). Re-reads the .info file on each attempt in case the primary
+// restarted on a different port. Respects context cancellation.
+func (s *TCPSender) reconnect(ctx context.Context) error {
 	s.conn.Close()
 
+	delay := reconnectBaseDelay
 	var lastErr error
-	for i := 0; i < reconnectAttempts; i++ {
+	for i := 0; i < reconnectMaxAttempts; i++ {
 		if i > 0 {
-			time.Sleep(reconnectDelay)
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("reconnect cancelled: %w", ctx.Err())
+			case <-s.ctx.Done():
+				return fmt.Errorf("proxy shutting down")
+			case <-time.After(delay):
+			}
+			// Exponential backoff, capped.
+			delay = delay * 2
+			if delay > reconnectMaxDelay {
+				delay = reconnectMaxDelay
+			}
 		}
+
+		// Re-read .info file — primary may have restarted on a different port.
+		s.refreshAddr()
+
 		conn, err := net.DialTimeout("tcp", s.addr, dialTimeout)
 		if err != nil {
 			lastErr = err
-			log.Printf("[proxy] reconnect attempt %d/%d failed: %v", i+1, reconnectAttempts, err)
+			log.Printf("[proxy] reconnect attempt %d/%d to %s failed: %v", i+1, reconnectMaxAttempts, s.addr, err)
 			continue
 		}
 		s.conn = conn
+		log.Printf("[proxy] reconnected to %s on attempt %d/%d", s.addr, i+1, reconnectMaxAttempts)
 		return nil
 	}
-	return fmt.Errorf("reconnect to %s after %d attempts: %w", s.addr, reconnectAttempts, lastErr)
+	return fmt.Errorf("reconnect to %s after %d attempts: %w", s.addr, reconnectMaxAttempts, lastErr)
 }
 
-// Close closes the TCP connection.
+// healthCheck periodically probes the primary instance. If the instance is
+// unreachable for multiple consecutive checks, the proxy exits so the IDE
+// can restart orchestra serve as a new primary.
+func (s *TCPSender) healthCheck() {
+	ticker := time.NewTicker(healthCheckInterval)
+	defer ticker.Stop()
+
+	consecutiveFails := 0
+	const maxConsecutiveFails = 3
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			// Re-read .info file in case primary restarted on a different port.
+			s.refreshAddr()
+
+			conn, err := net.DialTimeout("tcp", s.addr, healthCheckTimeout)
+			if err != nil {
+				consecutiveFails++
+				log.Printf("[proxy] health check failed (%d/%d): %v", consecutiveFails, maxConsecutiveFails, err)
+				if consecutiveFails >= maxConsecutiveFails {
+					log.Printf("[proxy] primary instance at %s unreachable after %d checks — exiting proxy", s.addr, maxConsecutiveFails)
+					fmt.Fprintf(os.Stderr, "orchestra: primary instance died — restart to become new primary\n")
+					s.cancel()
+					os.Exit(1)
+				}
+			} else {
+				conn.Close()
+				consecutiveFails = 0
+			}
+		}
+	}
+}
+
+// Close closes the TCP connection and stops the health check.
 func (s *TCPSender) Close() error {
+	s.cancel()
 	return s.conn.Close()
 }
