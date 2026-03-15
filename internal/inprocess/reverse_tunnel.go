@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net/url"
 	"os"
@@ -91,10 +91,10 @@ func (rt *ReverseTunnelClient) ReconnectLoop(ctx context.Context) {
 
 		if err != nil {
 			TunnelLog(31, "Disconnected: %v (reconnecting in %s)", err, backoff)
-			log.Printf("[reverse-tunnel] disconnected: %v (reconnecting in %s)", err, backoff)
+			slog.Warn("reverse tunnel disconnected", "error", err, "reconnect_in", backoff)
 		} else {
 			TunnelLog(33, "Disconnected (reconnecting in %s)", backoff)
-			log.Printf("[reverse-tunnel] disconnected (reconnecting in %s)", backoff)
+			slog.Warn("reverse tunnel disconnected", "reconnect_in", backoff)
 		}
 
 		// Wait with jitter before reconnecting.
@@ -118,7 +118,7 @@ func (rt *ReverseTunnelClient) ReconnectLoop(ctx context.Context) {
 func (rt *ReverseTunnelClient) connect(ctx context.Context) error {
 	wsURL := rt.buildURL()
 	TunnelLog(33, "Connecting to %s ...", rt.cloudURL)
-	log.Printf("[reverse-tunnel] connecting to %s", rt.cloudURL)
+	slog.Info("reverse tunnel connecting", "url", rt.cloudURL)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
@@ -132,7 +132,7 @@ func (rt *ReverseTunnelClient) connect(ctx context.Context) error {
 	defer conn.Close()
 
 	TunnelLog(32, "Connected (tunnel %s)", rt.tunnelID)
-	log.Printf("[reverse-tunnel] connected to %s (tunnel %s)", rt.cloudURL, rt.tunnelID)
+	slog.Info("reverse tunnel connected", "url", rt.cloudURL, "tunnel_id", rt.tunnelID)
 
 	// Fire OnConnect callback in background so it doesn't block relay.
 	if rt.OnConnect != nil {
@@ -162,7 +162,7 @@ func (rt *ReverseTunnelClient) connect(ctx context.Context) error {
 
 		var envelope relayEnvelope
 		if err := json.Unmarshal(msg, &envelope); err != nil {
-			log.Printf("[reverse-tunnel] invalid envelope: %v", err)
+			slog.Warn("reverse tunnel invalid envelope", "error", err)
 			continue
 		}
 

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -62,7 +62,7 @@ func ClaimTunnel(ctx context.Context, cloudURL, nonce string) (tunnelID, connect
 		resp, err := client.Do(req)
 		if err != nil {
 			// Network error — retry.
-			log.Printf("[claim] poll error: %v (retrying)", err)
+			slog.Warn("claim poll error, retrying", "error", err)
 			time.Sleep(claimPollInterval)
 			continue
 		}

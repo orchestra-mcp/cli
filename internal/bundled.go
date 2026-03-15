@@ -146,7 +146,7 @@ set_wip_limits, get_wip_limits, check_wip_limit
 get_progress, get_review_queue, get_blocked_features
 
 ### Metadata (6)
-add_labels, remove_labels, assign_feature, unassign_feature, set_estimate, save_note, list_notes
+add_labels, remove_labels, assign_feature, unassign_feature, set_estimate, save_feature_note, list_feature_notes
 
 ## Marketplace Tools (15 total)
 

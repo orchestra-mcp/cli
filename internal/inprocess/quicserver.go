@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
@@ -54,7 +54,7 @@ func (r *Router) ListenAndServeQUIC(ctx context.Context, addr string, certsDir s
 
 	go bridge.serve(ctx)
 
-	log.Printf("[inprocess] QUIC bridge listening on %s (for child plugin storage/cross-plugin calls)", actualAddr)
+	slog.Info("QUIC bridge listening", "addr", actualAddr, "purpose", "child plugin storage/cross-plugin calls")
 	return actualAddr, nil
 }
 
@@ -73,7 +73,7 @@ func (b *QUICBridge) serve(ctx context.Context) {
 			if ctx.Err() != nil {
 				return // graceful shutdown
 			}
-			log.Printf("[inprocess] quic accept: %v", err)
+			slog.Error("quic accept error", "error", err)
 			return
 		}
 		go b.handleConn(ctx, conn)
@@ -107,13 +107,13 @@ func (b *QUICBridge) handleStream(ctx context.Context, stream quic.Stream) {
 
 	resp, err := b.router.Send(ctx, &req)
 	if err != nil {
-		log.Printf("[inprocess] quic bridge dispatch: %v", err)
+		slog.Error("quic bridge dispatch error", "error", err)
 		return
 	}
 	resp.RequestId = req.GetRequestId()
 
 	if err := sdkplugin.WriteMessage(stream, resp); err != nil {
-		log.Printf("[inprocess] quic bridge write: %v", err)
+		slog.Error("quic bridge write error", "error", err)
 	}
 }
 

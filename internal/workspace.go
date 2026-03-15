@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	storagesqlite "github.com/orchestra-mcp/plugin-storage-sqlite"
 )
 
 // GenerateWorkspaceDocs creates or overwrites CLAUDE.md and AGENTS.md at the
@@ -18,9 +20,9 @@ func GenerateWorkspaceDocs(workspace string) {
 	claudeDir := filepath.Join(workspace, ".claude")
 	os.MkdirAll(claudeDir, 0755)
 
-	// Scan installed content from the filesystem.
-	skills := scanSkills(claudeDir)
-	agents := scanAgents(claudeDir)
+	// Scan installed content from filesystem + SQLite database (merge both sources).
+	skills := mergeUnique(scanSkills(claudeDir), storagesqlite.QuerySkillNames(workspace))
+	agents := mergeUnique(scanAgents(claudeDir), storagesqlite.QueryAgentNames(workspace))
 	hooks := scanHooks(claudeDir)
 
 	// Load pack registry for the installed packs section.
@@ -348,6 +350,23 @@ func buildAgentsMD(agents []string) string {
 	}
 
 	return b.String()
+}
+
+// mergeUnique merges two sorted string slices, deduplicates, and returns sorted.
+func mergeUnique(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	for _, s := range a {
+		seen[s] = true
+	}
+	for _, s := range b {
+		seen[s] = true
+	}
+	result := make([]string, 0, len(seen))
+	for s := range seen {
+		result = append(result, s)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // sortedPackNames returns pack names from the registry in alphabetical order.

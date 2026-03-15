@@ -11,7 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -99,7 +99,7 @@ func (wg *WebGateServer) ListenAndServe(ctx context.Context, addr string) error 
 		return fmt.Errorf("web-gate listen %s: %w", addr, err)
 	}
 	wg.listener = ln
-	log.Printf("[web-gate] listening on %s (WebSocket JSON-RPC gateway)", ln.Addr().String())
+	slog.Info("web-gate listening", "addr", ln.Addr().String(), "purpose", "WebSocket JSON-RPC gateway")
 
 	// Start the permission event poller — polls get_pending_permission and
 	// pushes results to all connected WebSocket clients.
@@ -248,11 +248,11 @@ func (wg *WebGateServer) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := wg.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[web-gate] upgrade error: %v", err)
+		slog.Error("web-gate upgrade error", "error", err)
 		return
 	}
 
-	log.Printf("[web-gate] WebSocket connection established from %s", r.RemoteAddr)
+	slog.Info("web-gate WebSocket connected", "remote", r.RemoteAddr)
 
 	// Use the server lifecycle context, NOT the HTTP request context.
 	// After WebSocket upgrade, r.Context() gets canceled by net/http when the
@@ -386,7 +386,7 @@ func (wg *WebGateServer) pollAndPushPermissions(ctx context.Context) {
 // connected WebSocket clients as server-initiated notifications. This enables
 // real-time streaming of tool cards and text in the web copilot.
 func (wg *WebGateServer) StartEventPoller(ctx context.Context) {
-	log.Printf("[web-gate] event poller started (200ms interval)")
+	slog.Debug("web-gate event poller started", "interval", "200ms")
 	go func() {
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
@@ -424,7 +424,7 @@ func (wg *WebGateServer) pollAndPushEvents(ctx context.Context) {
 	if err != nil {
 		// Log every 30s to avoid flooding.
 		if time.Now().Unix()%30 == 0 {
-			log.Printf("[web-gate] event poll error: %v", err)
+			slog.Warn("web-gate event poll error", "error", err)
 		}
 		return // tool not available (bridge-claude not running)
 	}
@@ -432,7 +432,7 @@ func (wg *WebGateServer) pollAndPushEvents(ctx context.Context) {
 	tc := resp.GetToolCall()
 	if tc == nil || !tc.GetSuccess() {
 		if tc != nil && tc.GetErrorCode() != "" {
-			log.Printf("[web-gate] event poll tool error: %s: %s", tc.GetErrorCode(), tc.GetErrorMessage())
+			slog.Warn("web-gate event poll tool error", "error_code", tc.GetErrorCode(), "error_message", tc.GetErrorMessage())
 		}
 		return
 	}
@@ -453,7 +453,7 @@ func (wg *WebGateServer) pollAndPushEvents(ctx context.Context) {
 		return
 	}
 
-	log.Printf("[web-gate] broadcasting %d session events to %d clients", len(events), nConns)
+	slog.Debug("web-gate broadcasting events", "events", len(events), "clients", nConns)
 
 	// Broadcast events to all connected WebSocket clients.
 	wg.broadcast("notifications/events", json.RawMessage(text))
@@ -497,7 +497,7 @@ func (wg *WebGateServer) handleConnectionWS(ctx context.Context, conn *wsConn) {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("[web-gate] read error: %v", err)
+				slog.Warn("web-gate read error", "error", err)
 			}
 			return
 		}
@@ -529,7 +529,7 @@ func (wg *WebGateServer) handleConnectionWS(ctx context.Context, conn *wsConn) {
 						_ = json.Unmarshal(r.Params, &p)
 					}
 					if p.Name == "respond_permission" || p.Name == "get_pending_permission" {
-						log.Printf("[web-gate] %s dispatch done (id=%v), writing response", p.Name, r.ID)
+						slog.Debug("web-gate dispatch done", "method", p.Name, "id", r.ID)
 					}
 				}
 				conn.writeJSON(resp)

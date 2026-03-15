@@ -18,9 +18,12 @@ import (
 	"syscall"
 	"time"
 
+	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/cli/internal/inprocess"
 	"github.com/orchestra-mcp/sdk-go/globaldb"
 	"github.com/orchestra-mcp/sdk-go/plugin"
+	"github.com/orchestra-mcp/sdk-go/workflow"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	// ----------------------------------------------------------------
 	// Core plugins (always bundled in-process, never removable)
@@ -33,6 +36,14 @@ import (
 	toolsmarketplace "github.com/orchestra-mcp/plugin-tools-marketplace"
 	toolsnotes "github.com/orchestra-mcp/plugin-tools-notes"
 	transportstdio "github.com/orchestra-mcp/plugin-transport-stdio"
+
+	// Optional plugins (now in-process instead of external QUIC)
+	bridgeclaude "github.com/orchestra-mcp/plugin-bridge-claude"
+	devtoolsapi "github.com/orchestra-mcp/plugin-devtools-api"
+	devtoolsdatabase "github.com/orchestra-mcp/plugin-devtools-database"
+	toolsagentops "github.com/orchestra-mcp/plugin-tools-agentops"
+	toolshealth "github.com/orchestra-mcp/plugin-health"
+	toolssessions "github.com/orchestra-mcp/plugin-tools-sessions"
 )
 
 // instanceInfo is written alongside the PID file so that new invocations can
@@ -151,6 +162,11 @@ func RunServe(args []string) {
 	// ----------------------------------------------------------------
 	router := inprocess.NewRouter()
 
+	// Context for plugin lifecycle (used by bridge.claude permission server
+	// and external plugin loader).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// ================================================================
 	// PHASE 1: CORE PLUGINS (always in-process)
 	// ================================================================
@@ -176,8 +192,9 @@ func RunServe(args []string) {
 	go backgroundVersionCheck()
 
 	// 1b. Core tools
+	wfEngine := resolveWorkflowEngine(absWorkspace)
 	initStoragePlugin(router, "tools.features", func(b *plugin.PluginBuilder) {
-		toolsfeatures.Register(b, router)
+		toolsfeatures.Register(b, router, wfEngine)
 	})
 
 	initStoragePlugin(router, "tools.marketplace", func(b *plugin.PluginBuilder) {
@@ -192,25 +209,86 @@ func RunServe(args []string) {
 		toolsdocs.Register(b, router, absWorkspace)
 	})
 
+	// 1b-2. Export tool (on-demand SQLite → markdown export)
+	registerExportTool(router, absWorkspace)
+
 	// 1c. Sync-cloud plugin (data sync to cloud dashboard)
 	var syncNow synccloud.SyncNowFunc
 	var syncSetAuth synccloud.SetAuthFunc
 	var syncCleanup synccloud.Cleanup
+	var syncSetOnPull synccloud.SetOnPullFunc
+	var syncSetOnImport synccloud.SetOnImportFunc
 	initStoragePlugin(router, "sync.cloud", func(b *plugin.PluginBuilder) {
-		syncCleanup, syncNow, syncSetAuth = synccloud.Register(b, router)
+		syncCleanup, syncNow, syncSetAuth, syncSetOnPull, syncSetOnImport = synccloud.Register(b, router)
 	})
+	// When skills/agents/hooks are pulled from cloud, regenerate workspace docs.
+	if syncSetOnPull != nil {
+		syncSetOnPull(func(entityTypes []string) {
+			log.Printf("[serve] sync pulled doc-affecting entities %v — regenerating workspace docs", entityTypes)
+			GenerateWorkspaceDocs(absWorkspace)
+		})
+	}
+	// After full import on login, regenerate workspace docs and rebuild RAG.
+	if syncSetOnImport != nil {
+		syncSetOnImport(func(importedCount int) {
+			log.Printf("[serve] full import complete (%d entities) — regenerating workspace docs", importedCount)
+			GenerateWorkspaceDocs(absWorkspace)
+		})
+	}
 	defer func() {
 		if syncCleanup != nil {
 			syncCleanup()
 		}
 	}()
 
+	// 1d. Previously-external plugins (now in-process)
+	{
+		b := plugin.New("tools.agentops")
+		if err := toolsagentops.Register(b); err != nil {
+			log.Printf("[serve] tools.agentops error: %v", err)
+		} else {
+			ep := b.Export()
+			router.RegisterPlugin(ep)
+			log.Printf("[serve] tools.agentops initialized (%d tools)", len(ep.Tools))
+		}
+	}
+
+	initStoragePlugin(router, "tools.sessions", func(b *plugin.PluginBuilder) {
+		toolssessions.Register(b, router)
+	})
+
+	{
+		b := plugin.New("bridge.claude")
+		claudeCleanup := bridgeclaude.RegisterWithContext(ctx, b)
+		ep := b.Export()
+		router.RegisterPlugin(ep)
+		log.Printf("[serve] bridge.claude initialized (%d tools)", len(ep.Tools))
+		defer func() {
+			if claudeCleanup != nil {
+				claudeCleanup()
+			}
+		}()
+	}
+
+	{
+		b := plugin.New("devtools.database")
+		devtoolsdatabase.Register(b)
+		ep := b.Export()
+		router.RegisterPlugin(ep)
+		log.Printf("[serve] devtools.database initialized (%d tools)", len(ep.Tools))
+	}
+
+	initStoragePlugin(router, "devtools.api", func(b *plugin.PluginBuilder) {
+		devtoolsapi.Register(b, router)
+	})
+
+	initStoragePlugin(router, "tools.health", func(b *plugin.PluginBuilder) {
+		toolshealth.Register(b, router)
+	})
+
 	// ================================================================
 	// PHASE 2: EXTERNAL PLUGINS (from ~/.orchestra/plugins/registry.json)
 	// ================================================================
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	certsDir := defaultCertsDir()
 	var externalProcesses []*ExternalProcess
 	var pluginCleanups []func()
@@ -411,6 +489,39 @@ func RunServe(args []string) {
 
 	// Block until signal (SIGINT/SIGTERM handled above).
 	<-ctx.Done()
+}
+
+// registerExportTool registers the export_markdown tool on the router.
+func registerExportTool(router *inprocess.Router, workspace string) {
+	builder := plugin.New("tools.export")
+
+	schema, _ := structpb.NewStruct(map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	})
+
+	builder.RegisterTool("export_markdown",
+		"Export all project data from SQLite to .projects/ as markdown files with YAML frontmatter. Use this when the user wants a local markdown copy of their data for git, backup, or migration.",
+		schema, func(_ context.Context, _ *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
+			count, err := storagesqlite.ExportToMarkdown(workspace)
+			if err != nil {
+				return &pluginv1.ToolResponse{
+					Success: false,
+					Result:  mustStruct(map[string]any{"error": err.Error()}),
+				}, nil
+			}
+			return &pluginv1.ToolResponse{
+				Success: true,
+				Result: mustStruct(map[string]any{
+					"exported": count,
+					"message":  fmt.Sprintf("Exported %d entities to .projects/ as markdown files.", count),
+				}),
+			}, nil
+		})
+
+	ep := builder.Export()
+	router.RegisterPlugin(ep)
+	log.Printf("[serve] tools.export initialized (%d tools)", len(ep.Tools))
 }
 
 // initStoragePlugin creates a plugin builder, calls the register function to
@@ -777,4 +888,22 @@ func workspaceTCPPort(absWorkspace string) int {
 	h := fnv.New32a()
 	h.Write([]byte(absWorkspace))
 	return 50101 + int(h.Sum32()%899) // range: 50101–50999
+}
+
+// resolveWorkflowEngine loads a custom WorkflowDefinition from the workspace's
+// .projects/.workflow/ directory. If no YAML file is found there (or the
+// directory doesn't exist), the built-in DefaultEngine() is returned so that
+// existing behaviour is completely unchanged.
+func resolveWorkflowEngine(absWorkspace string) *workflow.Engine {
+	dir := filepath.Join(absWorkspace, ".projects", ".workflow")
+	def, err := workflow.LoadFromDir(dir)
+	if err != nil {
+		log.Printf("[serve] workflow override load error: %v — using default engine", err)
+		return workflow.DefaultEngine()
+	}
+	if def == nil {
+		return workflow.DefaultEngine()
+	}
+	log.Printf("[serve] loaded custom workflow %q from %s", def.Name, dir)
+	return workflow.NewEngine(*def)
 }

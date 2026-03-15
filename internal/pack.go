@@ -20,9 +20,10 @@ type packManifest struct {
 	Version     string   `json:"version"`
 	Stacks      []string `json:"stacks"`
 	Contents    struct {
-		Skills []string `json:"skills"`
-		Agents []string `json:"agents"`
-		Hooks  []string `json:"hooks"`
+		Skills    []string `json:"skills"`
+		Agents    []string `json:"agents"`
+		Hooks     []string `json:"hooks"`
+		Workflows []string `json:"workflows"` // workflow YAML overrides
 	} `json:"contents"`
 	Tags []string `json:"tags"`
 }
@@ -36,6 +37,7 @@ type packEntry struct {
 	Skills      []string `json:"skills"`
 	Agents      []string `json:"agents"`
 	Hooks       []string `json:"hooks"`
+	Workflows   []string `json:"workflows,omitempty"` // workflow YAML overrides
 }
 
 // packRegistry holds the local pack registry.
@@ -125,6 +127,7 @@ func runPackInstall(args []string) {
 		Skills:      manifest.Contents.Skills,
 		Agents:      manifest.Contents.Agents,
 		Hooks:       manifest.Contents.Hooks,
+		Workflows:   manifest.Contents.Workflows,
 	}
 	savePackRegistry(absWorkspace, reg)
 
@@ -137,6 +140,9 @@ func runPackInstall(args []string) {
 	}
 	if len(manifest.Contents.Hooks) > 0 {
 		fmt.Fprintf(os.Stderr, "  Hooks: %s\n", strings.Join(manifest.Contents.Hooks, ", "))
+	}
+	if len(manifest.Contents.Workflows) > 0 {
+		fmt.Fprintf(os.Stderr, "  Workflows: %s\n", strings.Join(manifest.Contents.Workflows, ", "))
 	}
 
 	// Regenerate workspace docs to reflect new content.
@@ -163,7 +169,7 @@ func runPackRemove(args []string) {
 		fatal("pack %q is not installed", name)
 	}
 
-	removePackFiles(absWorkspace, entry.Skills, entry.Agents, entry.Hooks)
+	removePackFiles(absWorkspace, entry.Skills, entry.Agents, entry.Hooks, entry.Workflows)
 	delete(reg.Packs, name)
 	savePackRegistry(absWorkspace, reg)
 
@@ -206,7 +212,7 @@ func runPackUpdate(args []string) {
 
 	for packName, entry := range toUpdate {
 		fmt.Fprintf(os.Stderr, "Updating %s...\n", packName)
-		removePackFiles(absWorkspace, entry.Skills, entry.Agents, entry.Hooks)
+		removePackFiles(absWorkspace, entry.Skills, entry.Agents, entry.Hooks, entry.Workflows)
 
 		manifest, err := installPackFromGit(absWorkspace, entry.Repo, "")
 		if err != nil {
@@ -222,6 +228,7 @@ func runPackUpdate(args []string) {
 			Skills:      manifest.Contents.Skills,
 			Agents:      manifest.Contents.Agents,
 			Hooks:       manifest.Contents.Hooks,
+			Workflows:   manifest.Contents.Workflows,
 		}
 		fmt.Fprintf(os.Stderr, "  [OK] %s → %s\n", packName, manifest.Version)
 	}
@@ -461,10 +468,23 @@ func installPackFromGit(workspace, repo, version string) (*packManifest, error) 
 		}
 	}
 
+	// Copy workflow YAML override files into .projects/.workflow/.
+	workflowDir := filepath.Join(workspace, ".projects", ".workflow")
+	for _, name := range manifest.Contents.Workflows {
+		src := filepath.Join(tmpDir, "workflow", name)
+		dst := filepath.Join(workflowDir, name)
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return nil, fmt.Errorf("create workflow dir: %w", err)
+		}
+		if err := copySingleFile(src, dst); err != nil {
+			return nil, fmt.Errorf("copy workflow %s: %w", name, err)
+		}
+	}
+
 	return &manifest, nil
 }
 
-func removePackFiles(workspace string, skills, agents, hooks []string) {
+func removePackFiles(workspace string, skills, agents, hooks, workflows []string) {
 	claudeDir := filepath.Join(workspace, ".claude")
 	for _, name := range skills {
 		os.RemoveAll(filepath.Join(claudeDir, "skills", name))
@@ -474,6 +494,10 @@ func removePackFiles(workspace string, skills, agents, hooks []string) {
 	}
 	for _, name := range hooks {
 		os.Remove(filepath.Join(claudeDir, "hooks", name+".sh"))
+	}
+	workflowDir := filepath.Join(workspace, ".projects", ".workflow")
+	for _, name := range workflows {
+		os.Remove(filepath.Join(workflowDir, name))
 	}
 }
 

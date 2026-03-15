@@ -3,7 +3,7 @@ package inprocess
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 
@@ -55,7 +55,7 @@ func (s *TCPServer) Listen() error {
 		return fmt.Errorf("tcp listen %s: %w", s.addr, err)
 	}
 	s.listener = ln
-	log.Printf("[inprocess] TCP server listening on %s (for desktop apps)", ln.Addr().String())
+	slog.Info("TCP server listening", "addr", ln.Addr().String(), "purpose", "desktop apps")
 	return nil
 }
 
@@ -103,7 +103,7 @@ func (s *TCPServer) handleConn(ctx context.Context, conn net.Conn) {
 		delete(s.activeSessions, conn)
 		s.sessionsMu.Unlock()
 		if sessionID != "" {
-			log.Printf("[inprocess] tcp session %s disconnected — releasing locks", sessionID)
+			slog.Info("tcp session disconnected, releasing locks", "session_id", sessionID)
 			globaldb.ReleaseSessionLocks(sessionID)
 		}
 	}()
@@ -130,13 +130,13 @@ func (s *TCPServer) handleConn(ctx context.Context, conn net.Conn) {
 
 		resp, err := s.router.Send(ctx, &req)
 		if err != nil {
-			log.Printf("[inprocess] tcp dispatch: %v", err)
+			slog.Error("tcp dispatch error", "error", err)
 			continue
 		}
 		resp.RequestId = req.GetRequestId()
 
 		if err := plugin.WriteMessage(conn, resp); err != nil {
-			log.Printf("[inprocess] tcp write: %v", err)
+			slog.Error("tcp write error", "error", err)
 			return
 		}
 	}
@@ -187,7 +187,7 @@ func (s *TCPServer) handleStreamConn(ctx context.Context, conn net.Conn, req *pl
 				},
 			}
 			if err := plugin.WriteMessage(conn, chunkResp); err != nil {
-				log.Printf("[inprocess] tcp stream write chunk: %v", err)
+				slog.Error("tcp stream write chunk error", "stream_id", streamID, "error", err)
 				return
 			}
 			sequence++
@@ -215,6 +215,6 @@ func (s *TCPServer) handleStreamConn(ctx context.Context, conn net.Conn, req *pl
 		endResp.GetStreamEnd().ErrorMessage = handlerErr.Error()
 	}
 	if err := plugin.WriteMessage(conn, endResp); err != nil {
-		log.Printf("[inprocess] tcp stream write end: %v", err)
+		slog.Error("tcp stream write end error", "stream_id", streamID, "error", err)
 	}
 }

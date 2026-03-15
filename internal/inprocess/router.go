@@ -7,8 +7,9 @@ package inprocess
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
+	"time"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/sdk-go/plugin"
@@ -56,6 +57,12 @@ type Router struct {
 
 	// external maps pluginID -> ExternalPlugin for QUIC-connected plugins.
 	external map[string]*ExternalPlugin
+
+	// limiter enforces per-caller rate limits on tool calls.
+	limiter *rateLimiter
+
+	// metrics collects per-tool call statistics.
+	metrics *Metrics
 }
 
 // NewRouter creates a new in-process Router.
@@ -69,6 +76,8 @@ func NewRouter() *Router {
 		aiToolHandlers: make(map[string]map[string]plugin.ToolHandler),
 		aiToolDefs:     make(map[string]map[string]*pluginv1.ToolDefinition),
 		external:       make(map[string]*ExternalPlugin),
+		limiter:        newRateLimiter(),
+		metrics:        NewMetrics(),
 	}
 }
 
@@ -143,7 +152,7 @@ func (r *Router) RegisterPlugin(ep *plugin.ExportedPlugin) {
 		r.storageHandler = ep.StorageHandler
 	}
 
-	log.Printf("[inprocess] registered plugin %q (%d tools, %d prompts)", ep.ID, len(ep.Tools)+len(ep.StreamTools), len(ep.Prompts))
+	slog.Info("registered plugin", "plugin", ep.ID, "tools", len(ep.Tools)+len(ep.StreamTools), "prompts", len(ep.Prompts))
 }
 
 // RegisterExternal adds an external QUIC-connected plugin to the router.
@@ -167,7 +176,7 @@ func (r *Router) RegisterExternal(ep *ExternalPlugin) {
 			// plugin takes priority via routeToolCall's fallback path.
 			if _, exists := r.toolHandlers[def.Name]; exists {
 				delete(r.toolHandlers, def.Name)
-				log.Printf("[inprocess] external plugin %q overrides in-process tool %q", ep.ID, def.Name)
+				slog.Info("external plugin overrides in-process tool", "plugin", ep.ID, "tool", def.Name)
 			}
 			r.toolDefs[def.Name] = def
 		}
@@ -177,7 +186,7 @@ func (r *Router) RegisterExternal(ep *ExternalPlugin) {
 		r.promptDefs[def.Name] = def
 	}
 
-	log.Printf("[inprocess] registered external plugin %q (%d tools)", ep.ID, len(ep.ToolDefs))
+	slog.Info("registered external plugin", "plugin", ep.ID, "tools", len(ep.ToolDefs))
 }
 
 // providerAliases maps OpenAI-compatible providers to "openai" so they route
@@ -193,6 +202,10 @@ var providerAliases = map[string]string{
 // Send implements the Sender interface. It dispatches a PluginRequest to the
 // appropriate in-process handler based on the request type.
 func (r *Router) Send(ctx context.Context, req *pluginv1.PluginRequest) (*pluginv1.PluginResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context cancelled: %w", err)
+	}
+
 	switch rr := req.Request.(type) {
 
 	case *pluginv1.PluginRequest_ToolCall:
@@ -330,13 +343,41 @@ func (r *Router) findExternalPlugin(toolName, provider string) *ExternalPlugin {
 
 // routeToolCall dispatches a tool call to the in-process handler or external plugin.
 func (r *Router) routeToolCall(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.PluginResponse, error) {
+	// Rate limit check. Use caller_plugin as the rate limit key; fall back to
+	// "default" for callers that don't identify themselves.
+	caller := req.GetCallerPlugin()
+	if caller == "" {
+		caller = "default"
+	}
+	if err := r.limiter.allow(caller); err != nil {
+		slog.Warn("rate limit exceeded", "caller", caller, "tool", req.GetToolName(), "error", err)
+		return &pluginv1.PluginResponse{
+			Response: &pluginv1.PluginResponse_ToolCall{
+				ToolCall: &pluginv1.ToolResponse{
+					Success:      false,
+					ErrorCode:    "rate_limited",
+					ErrorMessage: err.Error(),
+				},
+			},
+		}, nil
+	}
+
+	start := time.Now()
+	toolName := req.GetToolName()
+	inputSize := 0
+	if req.GetArguments() != nil {
+		inputSize = len(req.GetArguments().GetFields())
+	}
+
 	r.mu.RLock()
-	handler, found := r.findToolHandler(req.GetToolName(), req.GetProvider())
-	ext := r.findExternalPlugin(req.GetToolName(), req.GetProvider())
+	handler, found := r.findToolHandler(toolName, req.GetProvider())
+	ext := r.findExternalPlugin(toolName, req.GetProvider())
 	r.mu.RUnlock()
 
 	if found {
-		result, err := handler(ctx, req)
+		result, err := safeCallTool(ctx, handler, req)
+		isErr := err != nil || (result != nil && !result.Success)
+		r.metrics.Record(toolName, time.Since(start), isErr, inputSize)
 		if err != nil {
 			return &pluginv1.PluginResponse{
 				Response: &pluginv1.PluginResponse_ToolCall{
@@ -355,12 +396,15 @@ func (r *Router) routeToolCall(ctx context.Context, req *pluginv1.ToolRequest) (
 
 	// Forward to external plugin via QUIC.
 	if ext != nil {
-		return ext.Send(ctx, &pluginv1.PluginRequest{
-			RequestId: req.GetToolName(),
+		resp, err := ext.Send(ctx, &pluginv1.PluginRequest{
+			RequestId: toolName,
 			Request: &pluginv1.PluginRequest_ToolCall{
 				ToolCall: req,
 			},
 		})
+		isErr := err != nil
+		r.metrics.Record(toolName, time.Since(start), isErr, inputSize)
+		return resp, err
 	}
 
 	msg := fmt.Sprintf("no plugin provides tool %q", req.GetToolName())
@@ -457,7 +501,7 @@ func (r *Router) routePromptGet(ctx context.Context, req *pluginv1.PromptGetRequ
 		}, nil
 	}
 
-	result, err := handler(ctx, req)
+	result, err := safeCallPrompt(ctx, handler, req)
 	if err != nil {
 		return &pluginv1.PluginResponse{
 			Response: &pluginv1.PluginResponse_PromptGet{
@@ -471,6 +515,41 @@ func (r *Router) routePromptGet(ctx context.Context, req *pluginv1.PromptGetRequ
 	return &pluginv1.PluginResponse{
 		Response: &pluginv1.PluginResponse_PromptGet{PromptGet: result},
 	}, nil
+}
+
+// GetMetrics returns the metrics collector for the router.
+func (r *Router) GetMetrics() *Metrics {
+	return r.metrics
+}
+
+// HealthCheck verifies that the router has storage and at least one tool registered.
+func (r *Router) HealthCheck() map[string]any {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	toolCount := len(r.toolDefs)
+	for _, providerDefs := range r.aiToolDefs {
+		toolCount += len(providerDefs)
+	}
+	for _, ep := range r.external {
+		toolCount += len(ep.ToolDefs)
+	}
+
+	status := "healthy"
+	if toolCount == 0 {
+		status = "degraded"
+	}
+	if r.storageHandler == nil {
+		status = "degraded"
+	}
+
+	return map[string]any{
+		"status":           status,
+		"tools_registered": toolCount,
+		"prompts_registered": len(r.promptDefs),
+		"external_plugins": len(r.external),
+		"has_storage":      r.storageHandler != nil,
+	}
 }
 
 // GetStreamHandler returns the streaming tool handler for the given tool name.
@@ -513,6 +592,39 @@ func (r *Router) ListToolNames() []string {
 	return names
 }
 
+// --- Panic recovery ---
+
+// safeCallTool calls a tool handler with panic recovery. If the handler panics,
+// the panic is caught and returned as an error instead of crashing the process.
+func safeCallTool(ctx context.Context, handler plugin.ToolHandler, req *pluginv1.ToolRequest) (result *pluginv1.ToolResponse, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic in tool handler", "tool", req.GetToolName(), "panic", r)
+			result = &pluginv1.ToolResponse{
+				Success:      false,
+				ErrorCode:    "panic",
+				ErrorMessage: fmt.Sprintf("tool panicked: %v", r),
+			}
+			err = nil
+		}
+	}()
+	return handler(ctx, req)
+}
+
+// safeCallPrompt calls a prompt handler with panic recovery.
+func safeCallPrompt(ctx context.Context, handler plugin.PromptHandler, req *pluginv1.PromptGetRequest) (result *pluginv1.PromptGetResponse, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic in prompt handler", "prompt", req.GetPromptName(), "panic", r)
+			result = &pluginv1.PromptGetResponse{
+				Description: fmt.Sprintf("prompt panicked: %v", r),
+			}
+			err = nil
+		}
+	}()
+	return handler(ctx, req)
+}
+
 // --- Storage routing ---
 
 func (r *Router) routeStorageRead(ctx context.Context, req *pluginv1.StorageReadRequest) (*pluginv1.PluginResponse, error) {
@@ -530,7 +642,7 @@ func (r *Router) routeStorageRead(ctx context.Context, req *pluginv1.StorageRead
 
 	resp, err := h.Read(ctx, req)
 	if err != nil {
-		log.Printf("[inprocess] storage_read error: %v", err)
+		slog.Warn("storage read error", "path", req.GetPath(), "error", err)
 		return &pluginv1.PluginResponse{
 			Response: &pluginv1.PluginResponse_StorageRead{
 				StorageRead: &pluginv1.StorageReadResponse{},
@@ -615,7 +727,7 @@ func (r *Router) routeStorageList(ctx context.Context, req *pluginv1.StorageList
 
 	resp, err := h.List(ctx, req)
 	if err != nil {
-		log.Printf("[inprocess] storage_list error: %v", err)
+		slog.Warn("storage list error", "prefix", req.GetPrefix(), "error", err)
 		return &pluginv1.PluginResponse{
 			Response: &pluginv1.PluginResponse_StorageList{
 				StorageList: &pluginv1.StorageListResponse{},

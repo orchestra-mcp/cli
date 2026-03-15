@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
@@ -74,13 +74,13 @@ func (s *TCPSender) Send(ctx context.Context, req *pluginv1.PluginRequest) (*plu
 	}
 
 	// Connection is broken — try to reconnect and retry.
-	log.Printf("[proxy] send failed (%v), attempting reconnect to %s", err, s.addr)
+	slog.Warn("send failed, attempting reconnect", "error", err, "addr", s.addr)
 
 	if reconnErr := s.reconnect(ctx); reconnErr != nil {
 		return nil, fmt.Errorf("send failed (%v) and reconnect failed: %w", err, reconnErr)
 	}
 
-	log.Printf("[proxy] reconnected to %s, retrying request", s.addr)
+	slog.Info("reconnected, retrying request", "addr", s.addr)
 	return s.sendOnce(req)
 }
 
@@ -115,7 +115,7 @@ func (s *TCPSender) refreshAddr() {
 		return
 	}
 	if info.TCPAddr != "" && info.TCPAddr != s.addr {
-		log.Printf("[proxy] primary address changed: %s → %s", s.addr, info.TCPAddr)
+		slog.Info("primary address changed", "old", s.addr, "new", info.TCPAddr)
 		s.addr = info.TCPAddr
 	}
 }
@@ -151,11 +151,11 @@ func (s *TCPSender) reconnect(ctx context.Context) error {
 		conn, err := net.DialTimeout("tcp", s.addr, dialTimeout)
 		if err != nil {
 			lastErr = err
-			log.Printf("[proxy] reconnect attempt %d/%d to %s failed: %v", i+1, reconnectMaxAttempts, s.addr, err)
+			slog.Warn("reconnect attempt failed", "attempt", i+1, "max", reconnectMaxAttempts, "addr", s.addr, "error", err)
 			continue
 		}
 		s.conn = conn
-		log.Printf("[proxy] reconnected to %s on attempt %d/%d", s.addr, i+1, reconnectMaxAttempts)
+		slog.Info("reconnected", "addr", s.addr, "attempt", i+1, "max", reconnectMaxAttempts)
 		return nil
 	}
 	return fmt.Errorf("reconnect to %s after %d attempts: %w", s.addr, reconnectMaxAttempts, lastErr)
@@ -182,9 +182,9 @@ func (s *TCPSender) healthCheck() {
 			conn, err := net.DialTimeout("tcp", s.addr, healthCheckTimeout)
 			if err != nil {
 				consecutiveFails++
-				log.Printf("[proxy] health check failed (%d/%d): %v", consecutiveFails, maxConsecutiveFails, err)
+				slog.Warn("health check failed", "consecutive", consecutiveFails, "max", maxConsecutiveFails, "error", err)
 				if consecutiveFails >= maxConsecutiveFails {
-					log.Printf("[proxy] primary instance at %s unreachable after %d checks — exiting proxy", s.addr, maxConsecutiveFails)
+					slog.Error("primary instance unreachable, exiting proxy", "addr", s.addr, "checks", maxConsecutiveFails)
 					fmt.Fprintf(os.Stderr, "orchestra: primary instance died — restart to become new primary\n")
 					s.cancel()
 					os.Exit(1)
