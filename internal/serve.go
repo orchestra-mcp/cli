@@ -35,6 +35,7 @@ import (
 	toolsfeatures "github.com/orchestra-mcp/plugin-tools-features"
 	toolsmarketplace "github.com/orchestra-mcp/plugin-tools-marketplace"
 	toolsnotes "github.com/orchestra-mcp/plugin-tools-notes"
+	toolssecrets "github.com/orchestra-mcp/plugin-tools-secrets"
 	transportstdio "github.com/orchestra-mcp/plugin-transport-stdio"
 
 	// Optional plugins (now in-process instead of external QUIC)
@@ -240,6 +241,18 @@ func RunServe(args []string) {
 			syncCleanup()
 		}
 	}()
+
+	// 1c-2. Core secrets plugin (encrypted local vault, synced key names to cloud)
+	{
+		b := plugin.New("tools.secrets")
+		if err := toolssecrets.Register(b); err != nil {
+			log.Printf("[serve] tools.secrets error: %v", err)
+		} else {
+			ep := b.Export()
+			router.RegisterPlugin(ep)
+			log.Printf("[serve] tools.secrets initialized (%d tools)", len(ep.Tools))
+		}
+	}
 
 	// 1d. Previously-external plugins (now in-process)
 	{
