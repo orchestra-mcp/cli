@@ -18,19 +18,20 @@ type IDEConfig struct {
 
 // ideRegistry maps IDE names to their config generators.
 var ideRegistry = map[string]*IDEConfig{
-	"claude":   claudeConfig(),
-	"cursor":   cursorConfig(),
-	"vscode":   vscodeConfig(),
-	"cline":    clineConfig(),
-	"windsurf": windsurfConfig(),
-	"codex":    codexConfig(),
-	"gemini":   geminiConfig(),
-	"zed":      zedConfig(),
-	"continue": continueConfig(),
+	"claude":         claudeConfig(),
+	"claude-desktop": claudeDesktopConfig(),
+	"cursor":         cursorConfig(),
+	"vscode":         vscodeConfig(),
+	"cline":          clineConfig(),
+	"windsurf":       windsurfConfig(),
+	"codex":          codexConfig(),
+	"gemini":         geminiConfig(),
+	"zed":            zedConfig(),
+	"continue":       continueConfig(),
 }
 
 func allIDENames() []string {
-	return []string{"claude", "cursor", "vscode", "cline", "windsurf", "codex", "gemini", "zed", "continue"}
+	return []string{"claude", "claude-desktop", "cursor", "vscode", "cline", "windsurf", "codex", "gemini", "zed", "continue"}
 }
 
 // orchestraServer returns the standard server config map for MCP JSON configs.
@@ -85,6 +86,42 @@ func claudeConfig() *IDEConfig {
 		},
 		Generate: func(ws, bin string) ([]byte, error) {
 			path := filepath.Join(ws, ".mcp.json")
+			return mergeJSONMcpConfig(path, "orchestra", orchestraServer(bin, ws))
+		},
+	}
+}
+
+// --- Claude Desktop (chat app) ---
+
+// claudeDesktopConfigPath returns the platform-specific path for Claude
+// Desktop's global MCP config file.
+func claudeDesktopConfigPath() string {
+	switch runtime.GOOS {
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+	case "windows":
+		appData := os.Getenv("APPDATA")
+		if appData == "" {
+			home, _ := os.UserHomeDir()
+			appData = filepath.Join(home, "AppData", "Roaming")
+		}
+		return filepath.Join(appData, "Claude", "claude_desktop_config.json")
+	default: // linux
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".config", "Claude", "claude_desktop_config.json")
+	}
+}
+
+func claudeDesktopConfig() *IDEConfig {
+	return &IDEConfig{
+		Name:    "claude-desktop",
+		Display: "Claude Desktop",
+		ConfigPath: func(_ string) string {
+			return claudeDesktopConfigPath()
+		},
+		Generate: func(ws, bin string) ([]byte, error) {
+			path := claudeDesktopConfigPath()
 			return mergeJSONMcpConfig(path, "orchestra", orchestraServer(bin, ws))
 		},
 	}

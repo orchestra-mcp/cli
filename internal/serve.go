@@ -35,6 +35,7 @@ import (
 	toolsfeatures "github.com/orchestra-mcp/plugin-tools-features"
 	toolsmarketplace "github.com/orchestra-mcp/plugin-tools-marketplace"
 	toolsnotes "github.com/orchestra-mcp/plugin-tools-notes"
+	toolsprompts "github.com/orchestra-mcp/plugin-tools-prompts"
 	toolssecrets "github.com/orchestra-mcp/plugin-tools-secrets"
 	transportstdio "github.com/orchestra-mcp/plugin-transport-stdio"
 
@@ -42,9 +43,16 @@ import (
 	bridgeclaude "github.com/orchestra-mcp/plugin-bridge-claude"
 	devtoolsapi "github.com/orchestra-mcp/plugin-devtools-api"
 	devtoolsdatabase "github.com/orchestra-mcp/plugin-devtools-database"
+	devtoolsssh "github.com/orchestra-mcp/plugin-devtools-ssh"
+
 	toolsagentops "github.com/orchestra-mcp/plugin-tools-agentops"
 	toolshealth "github.com/orchestra-mcp/plugin-health"
+	toolshooks "github.com/orchestra-mcp/plugin-tools-hooks"
 	toolssessions "github.com/orchestra-mcp/plugin-tools-sessions"
+
+	// Service plugins
+	servicesnotifications "github.com/orchestra-mcp/plugin-services-notifications"
+	servicesvoice "github.com/orchestra-mcp/plugin-services-voice"
 )
 
 // instanceInfo is written alongside the PID file so that new invocations can
@@ -195,7 +203,7 @@ func RunServe(args []string) {
 	// 1b. Core tools
 	wfEngine := resolveWorkflowEngine(absWorkspace)
 	initStoragePlugin(router, "tools.features", func(b *plugin.PluginBuilder) {
-		toolsfeatures.Register(b, router, wfEngine)
+		toolsfeatures.Register(b, router, wfEngine, toolsfeatures.WithCatalog(router))
 	})
 
 	initStoragePlugin(router, "tools.marketplace", func(b *plugin.PluginBuilder) {
@@ -210,6 +218,10 @@ func RunServe(args []string) {
 		toolsdocs.Register(b, router, absWorkspace)
 	})
 
+	initStoragePlugin(router, "tools.prompts", func(b *plugin.PluginBuilder) {
+		toolsprompts.Register(b, router)
+	})
+
 	// 1b-2. Export tool (on-demand SQLite → markdown export)
 	registerExportTool(router, absWorkspace)
 
@@ -219,8 +231,9 @@ func RunServe(args []string) {
 	var syncCleanup synccloud.Cleanup
 	var syncSetOnPull synccloud.SetOnPullFunc
 	var syncSetOnImport synccloud.SetOnImportFunc
+	var syncAuthCheck synccloud.AuthCheckFunc
 	initStoragePlugin(router, "sync.cloud", func(b *plugin.PluginBuilder) {
-		syncCleanup, syncNow, syncSetAuth, syncSetOnPull, syncSetOnImport = synccloud.Register(b, router)
+		syncCleanup, syncNow, syncSetAuth, syncSetOnPull, syncSetOnImport, syncAuthCheck = synccloud.Register(b, router)
 	})
 	// When skills/agents/hooks are pulled from cloud, regenerate workspace docs.
 	if syncSetOnPull != nil {
@@ -299,6 +312,50 @@ func RunServe(args []string) {
 		toolshealth.Register(b, router)
 	})
 
+	// Terminal PTY manager (provides create_terminal, send_input, terminal_output,
+	// resize_terminal, close_terminal, list_terminals for remote access via tunnel).
+	termMgr := inprocess.NewTerminalManager()
+	{
+		b := plugin.New("tools.terminal")
+		termMgr.RegisterTools(b)
+		ep := b.Export()
+		router.RegisterPlugin(ep)
+		log.Printf("[serve] tools.terminal initialized (%d tools)", len(ep.Tools))
+	}
+
+	{
+		b := plugin.New("devtools.ssh")
+		devtoolsssh.Register(b)
+		ep := b.Export()
+		router.RegisterPlugin(ep)
+		log.Printf("[serve] devtools.ssh initialized (%d tools)", len(ep.Tools))
+	}
+
+	// 1e. Service plugins (notifications, voice, hooks)
+	{
+		b := plugin.New("services.notifications")
+		servicesnotifications.Register(b, router)
+		ep := b.Export()
+		router.RegisterPlugin(ep)
+		log.Printf("[serve] services.notifications initialized (%d tools)", len(ep.Tools))
+	}
+
+	{
+		b := plugin.New("services.voice")
+		servicesvoice.Register(b)
+		ep := b.Export()
+		router.RegisterPlugin(ep)
+		log.Printf("[serve] services.voice initialized (%d tools)", len(ep.Tools))
+	}
+
+	{
+		b := plugin.New("tools.hooks")
+		toolshooks.Register(b, router)
+		ep := b.Export()
+		router.RegisterPlugin(ep)
+		log.Printf("[serve] tools.hooks initialized (%d tools)", len(ep.Tools))
+	}
+
 	// ================================================================
 	// PHASE 2: EXTERNAL PLUGINS (from ~/.orchestra/plugins/registry.json)
 	// ================================================================
@@ -348,6 +405,7 @@ func RunServe(args []string) {
 			}
 		}
 		webGate := inprocess.NewWebGateServer(router, *webGateKey, *cloudURL, absWorkspace, corsOrigins)
+		router.OnToolsChanged(func() { webGate.BroadcastToolsListChanged() })
 		go func() {
 			if err := webGate.ListenAndServe(ctx, *webGateAddr); err != nil {
 				log.Printf("[serve] web-gate error: %v", err)
@@ -365,12 +423,68 @@ func RunServe(args []string) {
 			log.Printf("[serve] tunnel registration token generated for %s", token.GateAddress)
 		}
 
-		// If --cloud-url is set, start the reverse tunnel flow:
-		// 1. Poll the cloud server to claim tunnel credentials after user pastes token
-		// 2. On success, establish persistent reverse WebSocket to cloud
-		if *cloudURL != "" && token != nil {
+		// If --cloud-url is set, start the reverse tunnel flow.
+		// Auto-connect: if user is authenticated (via ~/.orchestra/auth.json),
+		// register directly with JWT — no token paste needed.
+		// Fallback: manual token → claim polling flow.
+		if *cloudURL != "" {
 			go func() {
-				inprocess.TunnelLog(33, "Waiting for registration at %s ...", *cloudURL)
+				// Helper to start reverse tunnel once we have credentials.
+				startReverseTunnel := func(tunnelID, connToken, teamID, authToken string) {
+					if syncSetAuth != nil && authToken != "" {
+						syncSetAuth(authToken, teamID, tunnelID, tunnelID)
+						log.Printf("[serve] sync-cloud configured for tunnel %s (team %s)", tunnelID, teamID)
+					}
+
+					inprocess.TunnelLog(32, "Starting reverse connection to %s ...", *cloudURL)
+					rt := inprocess.NewReverseTunnelClient(*cloudURL, tunnelID, connToken, router)
+					rt.OnConnect = func(ctx context.Context) {
+						if syncNow == nil {
+							return
+						}
+						inprocess.TunnelLog(33, "Syncing data to cloud ...")
+						applied, _, errs, err := syncNow(ctx)
+						if err != nil {
+							inprocess.TunnelLog(31, "Sync failed: %v", err)
+						} else if applied > 0 || errs > 0 {
+							inprocess.TunnelLog(32, "Synced: %d applied, %d errors", applied, errs)
+						} else {
+							inprocess.TunnelLog(32, "Sync: up to date")
+						}
+					}
+					rt.ReconnectLoop(ctx)
+				}
+
+				// Try auto-connect if user is authenticated.
+				if syncAuthCheck != nil {
+					authInfo := syncAuthCheck()
+					if authInfo.Authenticated && authInfo.Token != "" {
+						inprocess.TunnelLog(33, "Auto-registering tunnel at %s ...", *cloudURL)
+						log.Printf("[serve] auto-registering tunnel (user authenticated)")
+						gateAddr := *webGateAddr
+						resp, err := inprocess.AutoRegisterTunnel(*cloudURL, authInfo.Token, gateAddr, absWorkspace, 0)
+						if err != nil {
+							inprocess.TunnelLog(31, "Auto-register failed: %v (falling back to manual token)", err)
+							log.Printf("[serve] auto-register failed: %v", err)
+						} else {
+							action := "Registered"
+							if resp.Reconnected {
+								action = "Reconnected"
+							}
+							inprocess.TunnelLog(32, "%s: %s", action, resp.TunnelID)
+							log.Printf("[serve] tunnel auto-registered: %s (reconnected=%v)", resp.TunnelID, resp.Reconnected)
+							startReverseTunnel(resp.TunnelID, resp.ConnectionToken, resp.TeamID, resp.AuthToken)
+							return
+						}
+					}
+				}
+
+				// Fallback: manual token → claim polling flow.
+				if token == nil {
+					inprocess.TunnelLog(33, "Not authenticated — paste the tunnel token in the web app to connect")
+					return
+				}
+				inprocess.TunnelLog(33, "Waiting for manual registration at %s ...", *cloudURL)
 				log.Printf("[serve] waiting for tunnel registration at %s ...", *cloudURL)
 				tunnelID, connToken, teamID, authToken, err := inprocess.ClaimTunnel(ctx, *cloudURL, token.Nonce)
 				if err != nil {
@@ -380,31 +494,7 @@ func RunServe(args []string) {
 				}
 				inprocess.TunnelLog(32, "Claimed: %s", tunnelID)
 				log.Printf("[serve] tunnel claimed: %s — starting reverse connection", tunnelID)
-
-				// Configure sync engine with tunnel context credentials.
-				if syncSetAuth != nil && authToken != "" {
-					syncSetAuth(authToken, teamID, tunnelID, tunnelID)
-					log.Printf("[serve] sync-cloud configured for tunnel %s (team %s)", tunnelID, teamID)
-				}
-
-				inprocess.TunnelLog(32, "Starting reverse connection to %s ...", *cloudURL)
-
-				rt := inprocess.NewReverseTunnelClient(*cloudURL, tunnelID, connToken, router)
-				rt.OnConnect = func(ctx context.Context) {
-					if syncNow == nil {
-						return
-					}
-					inprocess.TunnelLog(33, "Syncing data to cloud ...")
-					applied, _, errs, err := syncNow(ctx)
-					if err != nil {
-						inprocess.TunnelLog(31, "Sync failed: %v", err)
-					} else if applied > 0 || errs > 0 {
-						inprocess.TunnelLog(32, "Synced: %d applied, %d errors", applied, errs)
-					} else {
-						inprocess.TunnelLog(32, "Sync: up to date")
-					}
-				}
-				rt.ReconnectLoop(ctx)
+				startReverseTunnel(tunnelID, connToken, teamID, authToken)
 			}()
 		}
 	}
@@ -480,13 +570,18 @@ func RunServe(args []string) {
 	// Run stdio transport in a goroutine. If stdin closes (desktop app mode),
 	// the transport returns but the process keeps running for TCP connections.
 	// The process only exits on SIGINT/SIGTERM.
+	// Subscribe to all router events for stdio push to connected IDE clients.
+	_, stdioEventCh := router.EventBus().SubscribeAll()
+
 	go func() {
 		transport := transportstdio.NewTransport(router, os.Stdin, os.Stdout,
 			transportstdio.WithOnDisconnect(func(sessionID string) {
 				log.Printf("[serve] session %s disconnected — releasing locks", sessionID)
 				globaldb.ReleaseSessionLocks(sessionID)
 			}),
+			transportstdio.WithEventChannel(stdioEventCh),
 		)
+		router.OnToolsChanged(func() { transport.SendToolsListChanged() })
 		if err := transport.Run(ctx); err != nil {
 			if ctx.Err() == nil {
 				log.Printf("[serve] stdio transport ended: %v", err)

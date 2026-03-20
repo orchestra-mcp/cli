@@ -399,10 +399,14 @@ func runPackRecommend(args []string) {
 // --- helpers ---
 
 func parsePackRepoVersion(raw string) (string, string) {
+	var repo, version string
 	if idx := strings.LastIndex(raw, "@"); idx > 0 {
-		return raw[:idx], raw[idx+1:]
+		repo, version = raw[:idx], raw[idx+1:]
+	} else {
+		repo, version = raw, ""
 	}
-	return raw, ""
+	repo = normalizeRepo(repo)
+	return repo, version
 }
 
 func installPackFromGit(workspace, repo, version string) (*packManifest, error) {

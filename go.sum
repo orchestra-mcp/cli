@@ -1,4 +1,6 @@
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
+github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
+github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
@@ -61,6 +63,8 @@ github.com/orchestra-mcp/plugin-tools-marketplace v1.0.4 h1:WIGE6UXv4B8rVTNErLQf
 github.com/orchestra-mcp/plugin-tools-marketplace v1.0.4/go.mod h1:cmDhq7m07svXaLl2OW6lxt6EaLQvVRs6pgErw0EIHwA=
 github.com/orchestra-mcp/plugin-tools-notes v1.0.4 h1:mxZ5KkMYB8ct8OG4vqBjXaZunPqNvO0eYWVNu/zPJw0=
 github.com/orchestra-mcp/plugin-tools-notes v1.0.4/go.mod h1:ubpGiTWvJb4u/v2DwOEDIU5jntTLal6+X3d19At6MwU=
+github.com/orchestra-mcp/plugin-tools-prompts v0.1.0 h1:GL0+ZfVGZ9zxYUMJrIeEPi0ru8D7xYl3hFUulO+8zvc=
+github.com/orchestra-mcp/plugin-tools-prompts v0.1.0/go.mod h1:KP/rEi0M1d1wAo5aj63+dOpwXm9OtPe0SFoFNDjwvCM=
 github.com/orchestra-mcp/plugin-tools-secrets v0.1.0 h1:JDr+2dN0N71KGUde/CjBBzpcLGtadduz+wBrplBCWnE=
 github.com/orchestra-mcp/plugin-tools-secrets v0.1.0/go.mod h1:4FkRTWo5ZLq/wbkLqk6DJUym8EXU+A2UTwBHTiZfVP0=
 github.com/orchestra-mcp/plugin-tools-sessions v1.0.4 h1:8ir92fKjoypHsJQPlRfD9eVAf/VTDe7Df+pAcJo3tfI=

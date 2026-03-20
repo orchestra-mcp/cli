@@ -29,6 +29,27 @@ const (
 	reverseWriteTimeout = 10 * time.Second
 )
 
+// tunnelAllowedTools is the set of tools exposed through the reverse tunnel.
+// Only Claude Code bridge and Terminal tools are allowed — all others are filtered out.
+var tunnelAllowedTools = map[string]bool{
+	// Claude Code bridge (AI sessions)
+	"ai_prompt":      true,
+	"spawn_session":  true,
+	"kill_session":   true,
+	"session_status": true,
+	"list_active":    true,
+	// Terminal
+	"create_terminal":  true,
+	"send_input":       true,
+	"resize_terminal":  true,
+	"close_terminal":   true,
+	"terminal_output":  true,
+	"list_terminals":   true,
+	// Smart actions (used by mobile/web)
+	"receive_hook_event": true,
+	"get_hook_events":    true,
+}
+
 // TunnelLog writes a synchronized, newline-terminated log line to stderr.
 // Color codes: 32=green, 33=yellow, 31=red, 36=cyan.
 var tunnelLogMu sync.Mutex
@@ -281,6 +302,9 @@ func (rt *ReverseTunnelClient) handleToolsList(ctx context.Context, req *protoco
 
 	mcpTools := make([]protocol.MCPToolDefinition, 0, len(lt.Tools))
 	for _, td := range lt.Tools {
+		if !tunnelAllowedTools[td.Name] {
+			continue
+		}
 		mcpTools = append(mcpTools, wgToolDefToMCP(td))
 	}
 
@@ -305,6 +329,18 @@ func (rt *ReverseTunnelClient) handleToolsCall(ctx context.Context, req *protoco
 	}
 	if params.Name == "" {
 		return rtErrResp(req.ID, protocol.InvalidParams, "missing required parameter: name")
+	}
+
+	// Check tool whitelist.
+	if !tunnelAllowedTools[params.Name] {
+		return &protocol.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &protocol.JSONRPCError{
+				Code:    protocol.MethodNotFound,
+				Message: fmt.Sprintf("tool %q is not available through the tunnel", params.Name),
+			},
+		}
 	}
 
 	TunnelLog(36, "← tools/call %s", params.Name)

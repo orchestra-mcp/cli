@@ -261,7 +261,7 @@ func (wg *WebGateServer) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	connCtx, connCancel := context.WithCancel(wg.ctx)
 	go func() {
 		defer connCancel()
-		wsc := &wsConn{Conn: conn}
+		wsc := &wsConn{Conn: conn, logLevel: protocol.LogLevelWarning}
 		wg.registerConn(wsc)
 		defer wg.unregisterConn(wsc)
 		wg.handleConnectionWS(connCtx, wsc)
@@ -271,7 +271,8 @@ func (wg *WebGateServer) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 // wsConn wraps a gorilla/websocket conn with a write mutex for concurrent safety.
 type wsConn struct {
 	*websocket.Conn
-	writeMu sync.Mutex
+	writeMu  sync.Mutex
+	logLevel protocol.MCPLogLevel // minimum level for log notifications (default: warning)
 }
 
 func (c *wsConn) writeJSON(v any) error {
@@ -309,6 +310,25 @@ func (wg *WebGateServer) broadcast(method string, params any) {
 
 	for _, c := range snapshot {
 		_ = c.writeJSON(msg)
+	}
+}
+
+// BroadcastToolsListChanged sends a notifications/tools/list_changed JSON-RPC
+// notification to all connected WebSocket clients.
+func (wg *WebGateServer) BroadcastToolsListChanged() {
+	notif := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/tools/list_changed",
+	}
+	wg.connsMu.Lock()
+	snapshot := make([]*wsConn, 0, len(wg.conns))
+	for c := range wg.conns {
+		snapshot = append(snapshot, c)
+	}
+	wg.connsMu.Unlock()
+
+	for _, c := range snapshot {
+		_ = c.writeJSON(notif)
 	}
 }
 
@@ -553,6 +573,14 @@ func (wg *WebGateServer) dispatch(ctx context.Context, req *protocol.JSONRPCRequ
 		return wg.handlePromptsList(ctx, req)
 	case "prompts/get":
 		return wg.handlePromptsGet(ctx, req)
+	case "logging/setLevel":
+		return wg.handleLoggingSetLevel(req, conn)
+	case "resources/list":
+		return wg.handleResourcesList(ctx, req)
+	case "resources/read":
+		return wg.handleResourcesRead(ctx, req)
+	case "resources/templates/list":
+		return wg.handleResourceTemplatesList(req)
 	default:
 		if strings.HasPrefix(req.Method, "notifications/") {
 			return nil // notifications get no response
@@ -573,16 +601,181 @@ func (wg *WebGateServer) handleInitialize(req *protocol.JSONRPCRequest) *protoco
 		JSONRPC: "2.0",
 		ID:      req.ID,
 		Result: protocol.MCPInitializeResult{
-			ProtocolVersion: "2024-11-05",
+			ProtocolVersion: protocol.MCPProtocolVersion,
 			Capabilities: protocol.MCPServerCapabilities{
-				Tools:   &protocol.MCPToolsCapability{},
-				Prompts: &protocol.MCPPromptsCapability{},
+				Tools:     &protocol.MCPToolsCapability{ListChanged: true},
+				Prompts:   &protocol.MCPPromptsCapability{},
+				Logging:   &protocol.MCPLoggingCapability{},
+				Resources: &protocol.MCPResourcesCapability{},
 			},
 			ServerInfo: protocol.MCPServerInfo{
 				Name:    "orchestra-web-gate",
 				Version: "1.0.0",
 			},
 		},
+	}
+}
+
+func (wg *WebGateServer) handleLoggingSetLevel(req *protocol.JSONRPCRequest, conn *wsConn) *protocol.JSONRPCResponse {
+	var params struct {
+		Level string `json:"level"`
+	}
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return wgErrResp(req.ID, protocol.InvalidParams, fmt.Sprintf("invalid params: %v", err))
+		}
+	}
+
+	level := protocol.MCPLogLevel(params.Level)
+	if protocol.LogLevelSeverity(level) < 0 {
+		return wgErrResp(req.ID, protocol.InvalidParams, fmt.Sprintf("invalid log level: %q", params.Level))
+	}
+
+	conn.logLevel = level
+
+	return &protocol.JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result:  map[string]any{},
+	}
+}
+
+// resourcePrefixesWG mirrors the stdio transport's resource prefix list.
+var resourcePrefixesWG = []struct {
+	prefix   string
+	scheme   string
+	name     string
+	mimeType string
+}{
+	{"features/", "features", "Project Features", "text/markdown"},
+	{"notes/", "notes", "Project Notes", "text/markdown"},
+	{"docs/", "docs", "Project Documentation", "text/markdown"},
+}
+
+func (wg *WebGateServer) handleResourcesList(ctx context.Context, req *protocol.JSONRPCRequest) *protocol.JSONRPCResponse {
+	var resources []protocol.MCPResource
+
+	for _, rp := range resourcePrefixesWG {
+		resp, err := wg.router.Send(ctx, &pluginv1.PluginRequest{
+			RequestId: fmt.Sprintf("wg-rl-%v-%s", req.ID, rp.scheme),
+			Request: &pluginv1.PluginRequest_StorageList{
+				StorageList: &pluginv1.StorageListRequest{
+					Prefix: rp.prefix,
+				},
+			},
+		})
+		if err != nil {
+			continue
+		}
+		sl := resp.GetStorageList()
+		if sl == nil {
+			continue
+		}
+		for _, entry := range sl.GetEntries() {
+			name := entry.GetPath()
+			name = strings.TrimPrefix(name, rp.prefix)
+			name = strings.TrimSuffix(name, ".md")
+			resources = append(resources, protocol.MCPResource{
+				URI:      fmt.Sprintf("orchestra://%s/%s", rp.scheme, name),
+				Name:     name,
+				MimeType: rp.mimeType,
+			})
+		}
+	}
+
+	return &protocol.JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: struct {
+			Resources []protocol.MCPResource `json:"resources"`
+		}{Resources: resources},
+	}
+}
+
+func (wg *WebGateServer) handleResourcesRead(ctx context.Context, req *protocol.JSONRPCRequest) *protocol.JSONRPCResponse {
+	var params struct {
+		URI string `json:"uri"`
+	}
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return wgErrResp(req.ID, protocol.InvalidParams, fmt.Sprintf("invalid params: %v", err))
+		}
+	}
+	if params.URI == "" {
+		return wgErrResp(req.ID, protocol.InvalidParams, "missing required parameter: uri")
+	}
+
+	const uriPrefix = "orchestra://"
+	if !strings.HasPrefix(params.URI, uriPrefix) {
+		return wgErrResp(req.ID, protocol.InvalidParams, fmt.Sprintf("unsupported URI scheme: %q", params.URI))
+	}
+
+	rest := strings.TrimPrefix(params.URI, uriPrefix)
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		return wgErrResp(req.ID, protocol.InvalidParams, fmt.Sprintf("invalid resource URI: %q", params.URI))
+	}
+
+	scheme, id := parts[0], parts[1]
+	var storagePath, mimeType string
+	for _, rp := range resourcePrefixesWG {
+		if rp.scheme == scheme {
+			storagePath = rp.prefix + id + ".md"
+			mimeType = rp.mimeType
+			break
+		}
+	}
+	if storagePath == "" {
+		return wgErrResp(req.ID, protocol.InvalidParams, fmt.Sprintf("unknown resource type: %q", scheme))
+	}
+
+	resp, err := wg.router.Send(ctx, &pluginv1.PluginRequest{
+		RequestId: fmt.Sprintf("wg-rr-%v", req.ID),
+		Request: &pluginv1.PluginRequest_StorageRead{
+			StorageRead: &pluginv1.StorageReadRequest{
+				Path: storagePath,
+			},
+		},
+	})
+	if err != nil {
+		return wgErrResp(req.ID, protocol.InternalError, fmt.Sprintf("storage read failed: %v", err))
+	}
+
+	sr := resp.GetStorageRead()
+	if sr == nil {
+		return wgErrResp(req.ID, protocol.InternalError, "unexpected response type from storage")
+	}
+
+	return &protocol.JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: struct {
+			Contents []protocol.MCPResourceContent `json:"contents"`
+		}{
+			Contents: []protocol.MCPResourceContent{
+				{URI: params.URI, MimeType: mimeType, Text: string(sr.GetContent())},
+			},
+		},
+	}
+}
+
+func (wg *WebGateServer) handleResourceTemplatesList(req *protocol.JSONRPCRequest) *protocol.JSONRPCResponse {
+	templates := make([]protocol.MCPResourceTemplate, 0, len(resourcePrefixesWG))
+	for _, rp := range resourcePrefixesWG {
+		templates = append(templates, protocol.MCPResourceTemplate{
+			URITemplate: fmt.Sprintf("orchestra://%s/{id}", rp.scheme),
+			Name:        rp.name,
+			Description: fmt.Sprintf("Access %s by ID", rp.name),
+			MimeType:    rp.mimeType,
+		})
+	}
+
+	return &protocol.JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: struct {
+			ResourceTemplates []protocol.MCPResourceTemplate `json:"resourceTemplates"`
+		}{ResourceTemplates: templates},
 	}
 }
 
@@ -697,14 +890,17 @@ func (wg *WebGateServer) handleStreaming(ctx context.Context, req *protocol.JSON
 	chunks := make(chan []byte, 64)
 	var sequence int64
 
-	// Writer goroutine: sends chunks as notifications.
+	// Writer goroutine: sends chunks as JSON-RPC notifications.
+	// Using "method" field so the Flutter client routes them to the
+	// notifications stream (not as tool call responses).
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
 		for data := range chunks {
-			conn.writeJSON(protocol.JSONRPCResponse{
-				JSONRPC: "2.0",
-				Result: map[string]any{
+			conn.writeJSON(map[string]any{
+				"jsonrpc": "2.0",
+				"method":  "notifications/stream_chunk",
+				"params": map[string]any{
 					"stream_id": streamID,
 					"sequence":  sequence,
 					"data":      string(data),

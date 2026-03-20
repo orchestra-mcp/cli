@@ -217,11 +217,27 @@ func runDevInstall(repo, version, name string) {
 }
 
 // parseRepoVersion splits "github.com/foo/bar@v1.0.0" into repo and version.
+// Also supports shorthand "org/repo" → "github.com/org/repo".
 func parseRepoVersion(s string) (repo, version string) {
 	if idx := strings.LastIndex(s, "@"); idx != -1 {
-		return s[:idx], s[idx+1:]
+		repo, version = s[:idx], s[idx+1:]
+	} else {
+		repo, version = s, ""
 	}
-	return s, ""
+	repo = normalizeRepo(repo)
+	return
+}
+
+// normalizeRepo ensures the repo path has a domain prefix.
+// "org/repo" → "github.com/org/repo"
+// "github.com/org/repo" → unchanged
+func normalizeRepo(repo string) string {
+	parts := strings.Split(repo, "/")
+	// If there's no domain (only 2 segments like "org/repo"), prepend github.com.
+	if len(parts) == 2 && !strings.Contains(parts[0], ".") {
+		return "github.com/" + repo
+	}
+	return repo
 }
 
 // downloadRelease tries to download a pre-built binary from GitHub releases.

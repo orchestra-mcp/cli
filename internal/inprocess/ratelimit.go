@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	defaultRateLimit = 100 // calls per window
+	defaultRateLimit = 1000 // calls per window
 	rateLimitWindow  = time.Minute
 	rateLimitEnvVar  = "ORCHESTRA_RATE_LIMIT"
 )

@@ -85,17 +85,25 @@ func (s *TCPSender) Send(ctx context.Context, req *pluginv1.PluginRequest) (*plu
 }
 
 // sendOnce performs a single write+read exchange on the current connection.
+// It skips unsolicited EventDelivery messages pushed by the TCP server's event
+// bus goroutine, which can arrive between request and response and would
+// otherwise be misinterpreted as the tool call response.
 func (s *TCPSender) sendOnce(req *pluginv1.PluginRequest) (*pluginv1.PluginResponse, error) {
 	if err := plugin.WriteMessage(s.conn, req); err != nil {
 		return nil, fmt.Errorf("write to remote: %w", err)
 	}
 
-	var resp pluginv1.PluginResponse
-	if err := plugin.ReadMessage(s.conn, &resp); err != nil {
-		return nil, fmt.Errorf("read from remote: %w", err)
+	for {
+		var resp pluginv1.PluginResponse
+		if err := plugin.ReadMessage(s.conn, &resp); err != nil {
+			return nil, fmt.Errorf("read from remote: %w", err)
+		}
+		// Skip unsolicited EventDelivery pushes — the proxy doesn't consume them.
+		if resp.GetEventDelivery() != nil {
+			continue
+		}
+		return &resp, nil
 	}
-
-	return &resp, nil
 }
 
 // refreshAddr re-reads the .info file to discover the current TCP address.

@@ -8,12 +8,30 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/sdk-go/plugin"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/structpb"
 )
+
+// ToolCategory classifies how a tool is registered in the router.
+type ToolCategory = string
+
+const (
+	ToolCategoryGeneric  ToolCategory = "tool"
+	ToolCategoryAI       ToolCategory = "ai"
+	ToolCategoryStream   ToolCategory = "stream"
+	ToolCategoryExternal ToolCategory = "external"
+)
+
+// CatalogEntry is an alias for the sdk-go plugin.CatalogEntry type.
+type CatalogEntry = plugin.CatalogEntry
+
 
 // Router dispatches PluginRequests to in-process tool handlers, storage
 // handlers, and prompt handlers. It replaces the QUIC-based orchestrator
@@ -58,26 +76,46 @@ type Router struct {
 	// external maps pluginID -> ExternalPlugin for QUIC-connected plugins.
 	external map[string]*ExternalPlugin
 
+	// toolPluginMap maps toolName -> pluginID for catalog lookups.
+	toolPluginMap map[string]string
+
+	// toolCategoryMap maps toolName -> ToolCategory for catalog lookups.
+	toolCategoryMap map[string]ToolCategory
+
+	// toolProvidersMap maps toolName -> []provider for AI tools.
+	toolProvidersMap map[string][]string
+
 	// limiter enforces per-caller rate limits on tool calls.
 	limiter *rateLimiter
 
 	// metrics collects per-tool call statistics.
 	metrics *Metrics
+
+	// eventBus dispatches events to subscribers (desktop apps, hooks, etc.).
+	eventBus *EventBus
+
+	// onToolsChanged callbacks are invoked when tools are registered or
+	// unregistered, so transports can send notifications/tools/list_changed.
+	onToolsChanged []func()
 }
 
 // NewRouter creates a new in-process Router.
 func NewRouter() *Router {
 	return &Router{
-		toolHandlers:   make(map[string]plugin.ToolHandler),
-		streamHandlers: make(map[string]plugin.StreamingToolHandler),
-		promptHandlers: make(map[string]plugin.PromptHandler),
-		toolDefs:       make(map[string]*pluginv1.ToolDefinition),
-		promptDefs:     make(map[string]*pluginv1.PromptDefinition),
-		aiToolHandlers: make(map[string]map[string]plugin.ToolHandler),
-		aiToolDefs:     make(map[string]map[string]*pluginv1.ToolDefinition),
-		external:       make(map[string]*ExternalPlugin),
-		limiter:        newRateLimiter(),
-		metrics:        NewMetrics(),
+		toolHandlers:    make(map[string]plugin.ToolHandler),
+		streamHandlers:  make(map[string]plugin.StreamingToolHandler),
+		promptHandlers:  make(map[string]plugin.PromptHandler),
+		toolDefs:        make(map[string]*pluginv1.ToolDefinition),
+		promptDefs:      make(map[string]*pluginv1.PromptDefinition),
+		aiToolHandlers:  make(map[string]map[string]plugin.ToolHandler),
+		aiToolDefs:      make(map[string]map[string]*pluginv1.ToolDefinition),
+		external:        make(map[string]*ExternalPlugin),
+		toolPluginMap:   make(map[string]string),
+		toolCategoryMap: make(map[string]ToolCategory),
+		toolProvidersMap: make(map[string][]string),
+		limiter:         newRateLimiter(),
+		metrics:         NewMetrics(),
+		eventBus:        NewEventBus(),
 	}
 }
 
@@ -88,14 +126,39 @@ func (r *Router) SetStorageHandler(h plugin.StorageHandler) {
 	r.storageHandler = h
 }
 
+// EventBus returns the router's event bus for subscribing to events.
+func (r *Router) EventBus() *EventBus { return r.eventBus }
+
+// OnToolsChanged registers a callback invoked when tools are added or removed.
+// Used by transports to send notifications/tools/list_changed to clients.
+func (r *Router) OnToolsChanged(fn func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onToolsChanged = append(r.onToolsChanged, fn)
+}
+
+// notifyToolsChanged invokes all registered OnToolsChanged callbacks.
+// Must NOT be called with r.mu held (callbacks may re-enter the router).
+func (r *Router) notifyToolsChanged() {
+	r.mu.RLock()
+	callbacks := make([]func(), len(r.onToolsChanged))
+	copy(callbacks, r.onToolsChanged)
+	r.mu.RUnlock()
+
+	for _, fn := range callbacks {
+		fn()
+	}
+}
+
 // RegisterPlugin registers all tools, streaming tools, and prompts from an
 // ExportedPlugin. If the plugin's manifest declares ProvidesAI, tools are
 // indexed under the AI routing table instead of the generic tool table.
 func (r *Router) RegisterPlugin(ep *plugin.ExportedPlugin) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	isAI := len(ep.Manifest.GetProvidesAi()) > 0
+
+	pluginID := ep.ID
 
 	for _, t := range ep.Tools {
 		def := &pluginv1.ToolDefinition{
@@ -112,9 +175,14 @@ func (r *Router) RegisterPlugin(ep *plugin.ExportedPlugin) {
 				r.aiToolHandlers[provider][t.Name] = t.Handler
 				r.aiToolDefs[provider][t.Name] = def
 			}
+			r.toolPluginMap[t.Name] = pluginID
+			r.toolCategoryMap[t.Name] = ToolCategoryAI
+			r.toolProvidersMap[t.Name] = ep.Manifest.GetProvidesAi()
 		} else {
 			r.toolHandlers[t.Name] = t.Handler
 			r.toolDefs[t.Name] = def
+			r.toolPluginMap[t.Name] = pluginID
+			r.toolCategoryMap[t.Name] = ToolCategoryGeneric
 		}
 	}
 
@@ -133,8 +201,13 @@ func (r *Router) RegisterPlugin(ep *plugin.ExportedPlugin) {
 				}
 				r.aiToolDefs[provider][st.Name] = def
 			}
+			r.toolPluginMap[st.Name] = pluginID
+			r.toolCategoryMap[st.Name] = ToolCategoryStream
+			r.toolProvidersMap[st.Name] = ep.Manifest.GetProvidesAi()
 		} else {
 			r.toolDefs[st.Name] = def
+			r.toolPluginMap[st.Name] = pluginID
+			r.toolCategoryMap[st.Name] = ToolCategoryStream
 		}
 		r.streamHandlers[st.Name] = st.Handler
 	}
@@ -153,6 +226,9 @@ func (r *Router) RegisterPlugin(ep *plugin.ExportedPlugin) {
 	}
 
 	slog.Info("registered plugin", "plugin", ep.ID, "tools", len(ep.Tools)+len(ep.StreamTools), "prompts", len(ep.Prompts))
+	r.mu.Unlock()
+
+	r.notifyToolsChanged()
 }
 
 // RegisterExternal adds an external QUIC-connected plugin to the router.
@@ -160,7 +236,6 @@ func (r *Router) RegisterPlugin(ep *plugin.ExportedPlugin) {
 // allowing installable plugins to supersede bundled core tool definitions.
 func (r *Router) RegisterExternal(ep *ExternalPlugin) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.external[ep.ID] = ep
 
 	for _, def := range ep.ToolDefs {
@@ -171,6 +246,9 @@ func (r *Router) RegisterExternal(ep *ExternalPlugin) {
 				}
 				r.aiToolDefs[provider][def.Name] = def
 			}
+			r.toolPluginMap[def.Name] = ep.ID
+			r.toolCategoryMap[def.Name] = ToolCategoryAI
+			r.toolProvidersMap[def.Name] = ep.ProvidesAI
 		} else {
 			// Remove any in-process handler for this tool so the external
 			// plugin takes priority via routeToolCall's fallback path.
@@ -179,6 +257,8 @@ func (r *Router) RegisterExternal(ep *ExternalPlugin) {
 				slog.Info("external plugin overrides in-process tool", "plugin", ep.ID, "tool", def.Name)
 			}
 			r.toolDefs[def.Name] = def
+			r.toolPluginMap[def.Name] = ep.ID
+			r.toolCategoryMap[def.Name] = ToolCategoryExternal
 		}
 	}
 
@@ -187,6 +267,9 @@ func (r *Router) RegisterExternal(ep *ExternalPlugin) {
 	}
 
 	slog.Info("registered external plugin", "plugin", ep.ID, "tools", len(ep.ToolDefs))
+	r.mu.Unlock()
+
+	r.notifyToolsChanged()
 }
 
 // providerAliases maps OpenAI-compatible providers to "openai" so they route
@@ -252,13 +335,26 @@ func (r *Router) Send(ctx context.Context, req *pluginv1.PluginRequest) (*plugin
 		}, nil
 
 	case *pluginv1.PluginRequest_Publish:
-		// Events are not yet implemented in-process; acknowledge silently.
+		pub := rr.Publish
+		r.eventBus.Publish(pub.GetTopic(), pub.GetEventType(), pub.GetPayload(), pub.GetSourcePlugin())
 		return &pluginv1.PluginResponse{RequestId: req.GetRequestId()}, nil
 
 	case *pluginv1.PluginRequest_Subscribe:
-		return &pluginv1.PluginResponse{RequestId: req.GetRequestId()}, nil
+		sub := rr.Subscribe
+		id, _ := r.eventBus.Subscribe(sub.GetTopic())
+		return &pluginv1.PluginResponse{
+			RequestId: req.GetRequestId(),
+			Response: &pluginv1.PluginResponse_EventDelivery{
+				EventDelivery: &pluginv1.EventDelivery{
+					SubscriptionId: id,
+					Topic:          sub.GetTopic(),
+					EventType:      "subscribed",
+				},
+			},
+		}, nil
 
 	case *pluginv1.PluginRequest_Unsubscribe:
+		r.eventBus.Unsubscribe(rr.Unsubscribe.GetSubscriptionId())
 		return &pluginv1.PluginResponse{RequestId: req.GetRequestId()}, nil
 
 	default:
@@ -388,6 +484,10 @@ func (r *Router) routeToolCall(ctx context.Context, req *pluginv1.ToolRequest) (
 					},
 				},
 			}, nil
+		}
+		// Auto-publish event for mutating tool calls.
+		if result != nil && result.Success {
+			r.autoPublishToolEvent(toolName, req.GetArguments())
 		}
 		return &pluginv1.PluginResponse{
 			Response: &pluginv1.PluginResponse_ToolCall{ToolCall: result},
@@ -737,4 +837,215 @@ func (r *Router) routeStorageList(ctx context.Context, req *pluginv1.StorageList
 	return &pluginv1.PluginResponse{
 		Response: &pluginv1.PluginResponse_StorageList{StorageList: resp},
 	}, nil
+}
+
+// --- Tool Catalog ---
+
+// ListCatalog returns all registered tools as CatalogEntry values, sorted by name.
+// If pluginFilter is non-empty, only tools from that plugin are returned.
+func (r *Router) ListCatalog(pluginFilter string, offset, limit int) []CatalogEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	entries := r.buildCatalog(pluginFilter)
+
+	// Apply pagination.
+	if offset >= len(entries) {
+		return nil
+	}
+	end := offset + limit
+	if end > len(entries) || limit <= 0 {
+		end = len(entries)
+	}
+	return entries[offset:end]
+}
+
+// CatalogCount returns the total number of catalog entries (optionally filtered by plugin).
+func (r *Router) CatalogCount(pluginFilter string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.buildCatalog(pluginFilter))
+}
+
+// SearchCatalog searches tool names and descriptions for the query string.
+// Results are sorted: exact name matches first, then name-contains, then description-contains.
+func (r *Router) SearchCatalog(query string) []CatalogEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	all := r.buildCatalog("")
+	q := strings.ToLower(query)
+
+	var exact, nameMatch, descMatch []CatalogEntry
+	for _, e := range all {
+		nameLower := strings.ToLower(e.Name)
+		if nameLower == q {
+			exact = append(exact, e)
+		} else if strings.Contains(nameLower, q) {
+			nameMatch = append(nameMatch, e)
+		} else if strings.Contains(strings.ToLower(e.Description), q) {
+			descMatch = append(descMatch, e)
+		}
+	}
+
+	result := make([]CatalogEntry, 0, len(exact)+len(nameMatch)+len(descMatch))
+	result = append(result, exact...)
+	result = append(result, nameMatch...)
+	result = append(result, descMatch...)
+	return result
+}
+
+// GetCatalogEntry returns a single tool's CatalogEntry by name, or nil if not found.
+func (r *Router) GetCatalogEntry(toolName string) *CatalogEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	def := r.findToolDef(toolName)
+	if def == nil {
+		return nil
+	}
+
+	entry := CatalogEntry{
+		Name:        def.Name,
+		Description: def.Description,
+		PluginID:    r.toolPluginMap[toolName],
+		Category:    r.toolCategoryMap[toolName],
+		Providers:   r.toolProvidersMap[toolName],
+	}
+
+	// Serialize schema to JSON for the detail view.
+	if def.InputSchema != nil {
+		b, err := protojson.Marshal(def.InputSchema)
+		if err == nil {
+			entry.Schema = string(b)
+		}
+	}
+
+	return &entry
+}
+
+// ListPluginIDs returns the unique set of plugin IDs that have registered tools.
+func (r *Router) ListPluginIDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	for _, pid := range r.toolPluginMap {
+		seen[pid] = true
+	}
+	ids := make([]string, 0, len(seen))
+	for pid := range seen {
+		ids = append(ids, pid)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// buildCatalog assembles all catalog entries, optionally filtered by plugin ID.
+// Must be called with r.mu held (at least RLock).
+func (r *Router) buildCatalog(pluginFilter string) []CatalogEntry {
+	seen := make(map[string]bool)
+	var entries []CatalogEntry
+
+	addDef := func(def *pluginv1.ToolDefinition) {
+		if seen[def.Name] {
+			return
+		}
+		if pluginFilter != "" && r.toolPluginMap[def.Name] != pluginFilter {
+			return
+		}
+		seen[def.Name] = true
+		entries = append(entries, CatalogEntry{
+			Name:        def.Name,
+			Description: def.Description,
+			PluginID:    r.toolPluginMap[def.Name],
+			Category:    r.toolCategoryMap[def.Name],
+			Providers:   r.toolProvidersMap[def.Name],
+		})
+	}
+
+	for _, def := range r.toolDefs {
+		addDef(def)
+	}
+	for _, providerDefs := range r.aiToolDefs {
+		for _, def := range providerDefs {
+			addDef(def)
+		}
+	}
+	for _, ep := range r.external {
+		for _, def := range ep.ToolDefs {
+			addDef(def)
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name < entries[j].Name
+	})
+	return entries
+}
+
+// findToolDef looks up a ToolDefinition by name across all maps.
+// Must be called with r.mu held (at least RLock).
+func (r *Router) findToolDef(toolName string) *pluginv1.ToolDefinition {
+	if def, ok := r.toolDefs[toolName]; ok {
+		return def
+	}
+	for _, providerDefs := range r.aiToolDefs {
+		if def, ok := providerDefs[toolName]; ok {
+			return def
+		}
+	}
+	for _, ep := range r.external {
+		for _, def := range ep.ToolDefs {
+			if def.Name == toolName {
+				return def
+			}
+		}
+	}
+	return nil
+}
+
+// toolTopicMap maps tool name prefixes to event topics for auto-publishing.
+var toolTopicMap = map[string]string{
+	"create_feature":     "features",
+	"advance_feature":    "features",
+	"update_feature":     "features",
+	"submit_review":      "features",
+	"set_current_feature": "features",
+	"reject_feature":     "features",
+	"delete_feature":     "features",
+	"unlock_feature":     "features",
+
+	"create_project":  "projects",
+	"update_project":  "projects",
+	"delete_project":  "projects",
+
+	"create_plan":    "plans",
+	"update_plan":    "plans",
+	"approve_plan":   "plans",
+	"complete_plan":  "plans",
+	"breakdown_plan": "plans",
+	"delete_plan":    "plans",
+
+	"create_note":       "notes",
+	"update_note":       "notes",
+	"delete_note":       "notes",
+	"pin_note":          "notes",
+	"save_feature_note": "notes",
+
+	"create_person": "persons",
+	"update_person": "persons",
+	"delete_person": "persons",
+
+	"receive_hook_event": "hooks",
+}
+
+// autoPublishToolEvent publishes an event to the EventBus after a successful
+// mutating tool call. Only tools in toolTopicMap trigger events.
+func (r *Router) autoPublishToolEvent(toolName string, args *structpb.Struct) {
+	topic, ok := toolTopicMap[toolName]
+	if !ok {
+		return
+	}
+	r.eventBus.Publish(topic, toolName, args, "router")
 }

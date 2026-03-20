@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,6 +31,105 @@ func InstallBundledContent(workspace string) {
 		fmt.Fprintf(os.Stderr, "  [FAIL] orchestra agent: %v\n", err)
 	} else {
 		fmt.Fprintf(os.Stderr, "  [OK] .claude/agents/orchestra.md\n")
+	}
+
+	// --- hook scripts ---
+	hooksDir := filepath.Join(claudeDir, "hooks")
+	os.MkdirAll(hooksDir, 0755)
+
+	hookFiles := []struct {
+		name    string
+		content string
+	}{
+		{"orchestra-mcp-hook.sh", orchestraMCPHook},
+		{"orchestra-permission-hook.sh", orchestraPermissionHook},
+	}
+	for _, h := range hookFiles {
+		hookPath := filepath.Join(hooksDir, h.name)
+		if err := os.WriteFile(hookPath, []byte(h.content), 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "  [FAIL] %s: %v\n", h.name, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  [OK] .claude/hooks/%s\n", h.name)
+		}
+	}
+
+	// --- wire hooks into .claude/settings.json ---
+	mergeHooksIntoSettings(claudeDir, workspace)
+}
+
+// mergeHooksIntoSettings ensures the hooks section of .claude/settings.json
+// contains the Orchestra hook entries. It preserves any existing settings.
+func mergeHooksIntoSettings(claudeDir, workspace string) {
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+
+	// Read existing settings or start fresh.
+	var settings map[string]any
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			settings = make(map[string]any)
+		}
+	} else {
+		settings = make(map[string]any)
+	}
+
+	// Build hook paths relative to workspace.
+	mcpHookPath := filepath.Join(workspace, ".claude", "hooks", "orchestra-mcp-hook.sh")
+	permHookPath := filepath.Join(workspace, ".claude", "hooks", "orchestra-permission-hook.sh")
+
+	// Define the hooks we want.
+	asyncHook := func(cmd string) []any {
+		return []any{
+			map[string]any{
+				"hooks": []any{
+					map[string]any{
+						"type":    "command",
+						"command": cmd,
+						"async":   true,
+					},
+				},
+			},
+		}
+	}
+
+	orchestraHooks := map[string]any{
+		"Notification": asyncHook(mcpHookPath),
+		"Stop":         asyncHook(mcpHookPath),
+		"SubagentStart": asyncHook(mcpHookPath),
+		"SubagentStop":  asyncHook(mcpHookPath),
+		"PreToolUse": []any{
+			map[string]any{
+				"hooks": []any{
+					map[string]any{
+						"type":    "command",
+						"command": permHookPath,
+					},
+				},
+			},
+		},
+	}
+
+	// Merge: set hooks only if not already configured.
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = make(map[string]any)
+	}
+	for event, entries := range orchestraHooks {
+		if _, exists := hooks[event]; !exists {
+			hooks[event] = entries
+		}
+	}
+	settings["hooks"] = hooks
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  [FAIL] settings.json marshal: %v\n", err)
+		return
+	}
+	out = append(out, '\n')
+	if err := os.WriteFile(settingsPath, out, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "  [FAIL] settings.json: %v\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "  [OK] .claude/settings.json (hooks wired)\n")
 	}
 }
 
@@ -244,4 +344,113 @@ Each transition through a gate requires evidence of work done.
 - One feature at a time through the full lifecycle
 - Sub-agents write code only; the main agent handles all gates
 - Summarize results to the user before advancing features
+`
+
+const orchestraMCPHook = `#!/bin/bash
+# Orchestra MCP hook — pipes Claude Code events to MCP server
+# Called by Claude Code for all configured hook events (async, never blocks)
+set -e
+
+INPUT=$(cat)
+
+# Build the MCP messages: initialize handshake + tool call
+INIT='{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"orchestra-hook","version":"1.0.0"}}}'
+INITIALIZED='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+
+TOOL_CALL=$(echo "$INPUT" | jq -c '{
+  jsonrpc: "2.0", id: 1, method: "tools/call",
+  params: {
+    name: "receive_hook_event",
+    arguments: {
+      event_type: (.hook_event_name // "unknown"),
+      session_id: (.session_id // ""),
+      tool_name: (.tool_name // ""),
+      agent_type: (.agent_type // ""),
+      data: .
+    }
+  }
+}')
+
+# Send all three messages (init handshake + tool call) to orchestra via stdio
+printf '%s\n%s\n%s\n' "$INIT" "$INITIALIZED" "$TOOL_CALL" \
+  | orchestra --workspace "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null \
+  | head -2 > /dev/null
+
+exit 0
+`
+
+const orchestraPermissionHook = `#!/bin/bash
+# Orchestra permission hook — PreToolUse (synchronous/blocking)
+# Claude Code reads stdin with tool info and waits for this script to exit.
+# Exit 0  → allow the tool call to proceed
+# Exit 2 + print JSON {"decision":"deny","reason":"..."} → block the tool call
+#
+# We forward the permission request to the bridge-claude permission server
+# (running at a well-known port while a session is active) and wait for the
+# user's decision from the Swift desktop UI.
+
+## ── Guard: only intercept bridge-spawned Claude sessions ──────────────────
+# bridge-claude sets ORCHESTRA_BRIDGE_SESSION=1 when spawning ` + "`" + `claude -p` + "`" + `.
+# If this env var is NOT set, this is the user's own Claude Code session →
+# allow everything immediately so it never blocks the user's CLI.
+if [ -z "$ORCHESTRA_BRIDGE_SESSION" ]; then
+    exit 0
+fi
+
+INPUT=$(cat)
+
+# Extract tool name early so we can auto-approve safe tools.
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
+
+# ── Auto-approve safe (read-only / non-destructive) tools ──────────────────
+case "$TOOL_NAME" in
+    Read|Glob|Grep|WebFetch|WebSearch|AskUserQuestion|TodoWrite|EnterPlanMode|ExitPlanMode)
+        exit 0
+        ;;
+esac
+
+# Permission server port file — bridge-claude writes the port here when active
+PORT_FILE="${HOME}/.orchestra/permission-server.port"
+
+# If no permission server is running, allow by default (non-interactive context)
+if [ ! -f "$PORT_FILE" ]; then
+    exit 0
+fi
+
+PORT=$(cat "$PORT_FILE" 2>/dev/null)
+if [ -z "$PORT" ]; then
+    exit 0
+fi
+
+# Build the payload to send to the permission server
+PAYLOAD=$(echo "$INPUT" | jq -c '{
+    tool_name: (.tool_name // "unknown"),
+    tool_input: (.tool_input // {}),
+    session_id: (.session_id // ""),
+    cwd: (.cwd // "")
+}')
+
+# POST to the bridge-claude permission server.
+# This call blocks until the user responds (or times out after 5 minutes).
+RESPONSE=$(curl -s -X POST \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD" \
+    --max-time 300 \
+    "http://127.0.0.1:${PORT}/permission" 2>/dev/null)
+
+if [ $? -ne 0 ] || [ -z "$RESPONSE" ]; then
+    # curl failed or timed out — allow by default
+    exit 0
+fi
+
+DECISION=$(echo "$RESPONSE" | jq -r '.decision // "approve"')
+
+if [ "$DECISION" = "deny" ]; then
+    REASON=$(echo "$RESPONSE" | jq -r '.reason // "Permission denied by user"')
+    echo "{\"decision\":\"deny\",\"reason\":\"${REASON}\"}"
+    exit 2
+fi
+
+# approve or any other value → allow
+exit 0
 `

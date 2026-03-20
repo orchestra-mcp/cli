@@ -94,8 +94,20 @@ func (s *TCPServer) ListenAndServe(ctx context.Context) error {
 // If a StreamStart request arrives, the connection is handed off to
 // handleStreamConn. Session IDs are tracked so that session locks can be
 // released when the connection closes.
+//
+// The connection also receives pushed events from the EventBus: a background
+// goroutine subscribes to all events and writes EventDelivery messages to the
+// client without any prior request.
 func (s *TCPServer) handleConn(ctx context.Context, conn net.Conn) {
+	// Subscribe to all events for this connection.
+	subID, eventCh := s.router.EventBus().SubscribeAll()
+
+	// connMu serialises writes to conn between the request/response loop
+	// and the event push goroutine.
+	var connMu sync.Mutex
+
 	defer func() {
+		s.router.EventBus().Unsubscribe(subID)
 		conn.Close()
 		// Release session locks for this connection.
 		s.sessionsMu.Lock()
@@ -105,6 +117,23 @@ func (s *TCPServer) handleConn(ctx context.Context, conn net.Conn) {
 		if sessionID != "" {
 			slog.Info("tcp session disconnected, releasing locks", "session_id", sessionID)
 			globaldb.ReleaseSessionLocks(sessionID)
+		}
+	}()
+
+	// Event push goroutine — writes unsolicited EventDelivery to the client.
+	go func() {
+		for ev := range eventCh {
+			resp := &pluginv1.PluginResponse{
+				Response: &pluginv1.PluginResponse_EventDelivery{
+					EventDelivery: ev,
+				},
+			}
+			connMu.Lock()
+			err := plugin.WriteMessage(conn, resp)
+			connMu.Unlock()
+			if err != nil {
+				return // connection closed
+			}
 		}
 	}()
 
@@ -135,8 +164,11 @@ func (s *TCPServer) handleConn(ctx context.Context, conn net.Conn) {
 		}
 		resp.RequestId = req.GetRequestId()
 
-		if err := plugin.WriteMessage(conn, resp); err != nil {
-			slog.Error("tcp write error", "error", err)
+		connMu.Lock()
+		writeErr := plugin.WriteMessage(conn, resp)
+		connMu.Unlock()
+		if writeErr != nil {
+			slog.Error("tcp write error", "error", writeErr)
 			return
 		}
 	}
