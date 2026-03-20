@@ -4,27 +4,27 @@ go 1.25.0
 
 require (
 	github.com/gorilla/websocket v1.5.3
-	github.com/orchestra-mcp/gen-go v1.0.5
-	github.com/orchestra-mcp/plugin-bridge-claude v1.0.5
-	github.com/orchestra-mcp/plugin-devtools-api v1.0.4
-	github.com/orchestra-mcp/plugin-devtools-database v1.0.5
-	github.com/orchestra-mcp/plugin-devtools-ssh v1.0.5
-	github.com/orchestra-mcp/plugin-health v1.0.4
-	github.com/orchestra-mcp/plugin-storage-markdown v1.0.5
-	github.com/orchestra-mcp/plugin-storage-sqlite v1.0.5
-	github.com/orchestra-mcp/plugin-sync-cloud v1.0.5
-	github.com/orchestra-mcp/plugin-services-notifications v1.0.5
-	github.com/orchestra-mcp/plugin-services-voice v1.0.5
-	github.com/orchestra-mcp/plugin-tools-agentops v1.0.5
-	github.com/orchestra-mcp/plugin-tools-docs v1.0.5
-	github.com/orchestra-mcp/plugin-tools-features v1.0.5
-	github.com/orchestra-mcp/plugin-tools-marketplace v1.0.5
-	github.com/orchestra-mcp/plugin-tools-notes v1.0.5
+	github.com/orchestra-mcp/gen-go v1.0.6
+	github.com/orchestra-mcp/plugin-bridge-claude v1.0.6
+	github.com/orchestra-mcp/plugin-devtools-api v1.0.5
+	github.com/orchestra-mcp/plugin-devtools-database v1.0.6
+	github.com/orchestra-mcp/plugin-devtools-ssh v1.0.6
+	github.com/orchestra-mcp/plugin-health v1.0.5
+	github.com/orchestra-mcp/plugin-storage-markdown v1.0.6
+	github.com/orchestra-mcp/plugin-storage-sqlite v1.0.6
+	github.com/orchestra-mcp/plugin-sync-cloud v1.0.6
+	github.com/orchestra-mcp/plugin-services-notifications v1.0.6
+	github.com/orchestra-mcp/plugin-services-voice v1.0.6
+	github.com/orchestra-mcp/plugin-tools-agentops v1.0.6
+	github.com/orchestra-mcp/plugin-tools-docs v1.0.6
+	github.com/orchestra-mcp/plugin-tools-features v1.0.6
+	github.com/orchestra-mcp/plugin-tools-marketplace v1.0.6
+	github.com/orchestra-mcp/plugin-tools-notes v1.0.6
 	github.com/orchestra-mcp/plugin-tools-prompts v0.1.0
 	github.com/orchestra-mcp/plugin-tools-secrets v0.1.0
-	github.com/orchestra-mcp/plugin-tools-sessions v1.0.5
-	github.com/orchestra-mcp/plugin-transport-stdio v1.0.5
-	github.com/orchestra-mcp/sdk-go v1.0.5
+	github.com/orchestra-mcp/plugin-tools-sessions v1.0.6
+	github.com/orchestra-mcp/plugin-transport-stdio v1.0.6
+	github.com/orchestra-mcp/sdk-go v1.0.6
 	github.com/quic-go/quic-go v0.50.0
 	golang.org/x/term v0.40.0
 	google.golang.org/protobuf v1.36.11

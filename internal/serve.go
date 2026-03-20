@@ -18,10 +18,11 @@ import (
 	"syscall"
 	"time"
 
-	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/cli/internal/inprocess"
+	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
 	"github.com/orchestra-mcp/sdk-go/globaldb"
 	"github.com/orchestra-mcp/sdk-go/plugin"
+	"github.com/orchestra-mcp/sdk-go/protocol"
 	"github.com/orchestra-mcp/sdk-go/workflow"
 	"google.golang.org/protobuf/types/known/structpb"
 
@@ -45,8 +46,8 @@ import (
 	devtoolsdatabase "github.com/orchestra-mcp/plugin-devtools-database"
 	devtoolsssh "github.com/orchestra-mcp/plugin-devtools-ssh"
 
-	toolsagentops "github.com/orchestra-mcp/plugin-tools-agentops"
 	toolshealth "github.com/orchestra-mcp/plugin-health"
+	toolsagentops "github.com/orchestra-mcp/plugin-tools-agentops"
 	toolshooks "github.com/orchestra-mcp/plugin-tools-hooks"
 	toolssessions "github.com/orchestra-mcp/plugin-tools-sessions"
 
@@ -181,12 +182,17 @@ func RunServe(args []string) {
 	// ================================================================
 
 	// 1a. Storage (must be first — other plugins depend on it)
+	// Both backends are always initialized. --storage selects which is primary
+	// (authoritative for reads and versioning). The other backend receives a
+	// synchronous best-effort mirror of every write and delete.
+	sqliteStorage := storagesqlite.NewStorage(absWorkspace)
+	markdownStorage := storagemarkdown.NewStorage(absWorkspace)
 	if *storageBackend == "markdown" {
-		router.SetStorageHandler(storagemarkdown.NewStorage(absWorkspace))
-		log.Printf("[serve] storage.markdown initialized (workspace: %s)", absWorkspace)
+		router.SetStorageHandler(inprocess.NewDualStorage(markdownStorage, sqliteStorage))
+		log.Printf("[serve] storage.dual (primary: markdown, mirror: sqlite) initialized (workspace: %s)", absWorkspace)
 	} else {
-		router.SetStorageHandler(storagesqlite.NewStorage(absWorkspace))
-		log.Printf("[serve] storage.sqlite initialized (workspace: %s)", absWorkspace)
+		router.SetStorageHandler(inprocess.NewDualStorage(sqliteStorage, markdownStorage))
+		log.Printf("[serve] storage.dual (primary: sqlite, mirror: markdown) initialized (workspace: %s)", absWorkspace)
 	}
 
 	// 1a-2. Global database — migrate JSON configs (me.json, accounts.json, workspaces.json)
@@ -405,6 +411,7 @@ func RunServe(args []string) {
 			}
 		}
 		webGate := inprocess.NewWebGateServer(router, *webGateKey, *cloudURL, absWorkspace, corsOrigins)
+		webGate.SetServerInfo(serverInfo())
 		router.OnToolsChanged(func() { webGate.BroadcastToolsListChanged() })
 		go func() {
 			if err := webGate.ListenAndServe(ctx, *webGateAddr); err != nil {
@@ -575,6 +582,7 @@ func RunServe(args []string) {
 
 	go func() {
 		transport := transportstdio.NewTransport(router, os.Stdin, os.Stdout,
+			transportstdio.WithServerInfo(serverInfo()),
 			transportstdio.WithOnDisconnect(func(sessionID string) {
 				log.Printf("[serve] session %s disconnected — releasing locks", sessionID)
 				globaldb.ReleaseSessionLocks(sessionID)
@@ -640,6 +648,16 @@ func initStoragePlugin(router *inprocess.Router, id string, register func(b *plu
 	ep := builder.Export()
 	router.RegisterPlugin(ep)
 	log.Printf("[serve] %s initialized (%d tools)", id, len(ep.Tools))
+}
+
+// serverInfo returns the MCPServerInfo used in MCP initialize responses.
+func serverInfo() protocol.MCPServerInfo {
+	return protocol.MCPServerInfo{
+		Name:        "Orchestra MCP",
+		Version:     Version,
+		Title:       "Orchestra",
+		Description: "AI-powered project management with gated feature workflows, marketplace packs, and multi-agent orchestration",
+	}
 }
 
 func defaultCertsDir() string {
@@ -928,6 +946,7 @@ func runProxyMode(info *instanceInfo, infoFile string) {
 	}()
 
 	transport := transportstdio.NewTransport(sender, os.Stdin, os.Stdout,
+		transportstdio.WithServerInfo(serverInfo()),
 		transportstdio.WithOnDisconnect(func(sessionID string) {
 			// Session locks live on the remote instance. The remote TCP server
 			// tracks session IDs and releases locks when this connection closes.

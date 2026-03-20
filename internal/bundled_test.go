@@ -39,9 +39,77 @@ func TestInstallBundledContent_CreatesSkillAndAgent(t *testing.T) {
 		t.Fatalf("project-manager skill not found: %v", err)
 	}
 
+	orchSkillPath := filepath.Join(tmp, ".claude", "skills", "orchestra", "SKILL.md")
+	if _, err := os.Stat(orchSkillPath); err != nil {
+		t.Fatalf("orchestra skill not found: %v", err)
+	}
+
 	agentPath := filepath.Join(tmp, ".claude", "agents", "orchestra.md")
 	if _, err := os.Stat(agentPath); err != nil {
 		t.Fatalf("orchestra agent not found: %v", err)
+	}
+}
+
+func TestInstallBundledContent_OrchestraSkillHasFrontmatter(t *testing.T) {
+	tmp := t.TempDir()
+
+	InstallBundledContent(tmp)
+
+	orchSkillPath := filepath.Join(tmp, ".claude", "skills", "orchestra", "SKILL.md")
+	data, err := os.ReadFile(orchSkillPath)
+	if err != nil {
+		t.Fatalf("read orchestra skill: %v", err)
+	}
+	content := string(data)
+
+	if !contains(content, "name: orchestra") {
+		t.Error("orchestra skill should have 'name: orchestra' in frontmatter")
+	}
+	if !contains(content, "create_feature") {
+		t.Error("orchestra skill should reference create_feature tool")
+	}
+	if !contains(content, "advance_feature") {
+		t.Error("orchestra skill should reference advance_feature tool")
+	}
+}
+
+func TestInstallBundledContent_OrchestraAgentHasWorkflow(t *testing.T) {
+	tmp := t.TempDir()
+
+	InstallBundledContent(tmp)
+
+	agentPath := filepath.Join(tmp, ".claude", "agents", "orchestra.md")
+	data, err := os.ReadFile(agentPath)
+	if err != nil {
+		t.Fatalf("read orchestra agent: %v", err)
+	}
+	content := string(data)
+
+	if !contains(content, "set_current_feature") {
+		t.Error("orchestra agent should reference set_current_feature")
+	}
+	if !contains(content, "AskUserQuestion") {
+		t.Error("orchestra agent should reference AskUserQuestion")
+	}
+	if !contains(content, "submit_review") {
+		t.Error("orchestra agent should reference submit_review")
+	}
+}
+
+func TestInstallBundledContent_HookUsesCurrentProtocol(t *testing.T) {
+	tmp := t.TempDir()
+
+	InstallBundledContent(tmp)
+
+	hookPath := filepath.Join(tmp, ".claude", "hooks", "orchestra-mcp-hook.sh")
+	data, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read hook: %v", err)
+	}
+	content := string(data)
+
+	if !contains(content, "2025-11-25") {
+		t.Error("hook should use MCP protocol version 2025-11-25")
 	}
 }
 

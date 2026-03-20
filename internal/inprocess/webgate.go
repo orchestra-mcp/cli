@@ -40,6 +40,8 @@ type WebGateServer struct {
 	ctx          context.Context    // server lifecycle context
 	cancel       context.CancelFunc // cancels ctx on shutdown
 
+	serverInfo protocol.MCPServerInfo // returned in MCP initialize
+
 	// connRegistry tracks all connected WebSocket clients so we can push
 	// server-initiated notifications (e.g. permission events).
 	connsMu sync.Mutex
@@ -68,6 +70,22 @@ func NewWebGateServer(router *Router, apiKey, cloudURL, workspace string, corsOr
 		CheckOrigin:     wg.checkOrigin,
 	}
 	return wg
+}
+
+// SetServerInfo sets the server name and version for MCP initialize responses.
+func (wg *WebGateServer) SetServerInfo(info protocol.MCPServerInfo) {
+	wg.serverInfo = info
+}
+
+func (wg *WebGateServer) effectiveServerInfo() protocol.MCPServerInfo {
+	info := wg.serverInfo
+	if info.Name == "" {
+		info.Name = "Orchestra MCP"
+	}
+	if info.Version == "" {
+		info.Version = "dev"
+	}
+	return info
 }
 
 // Addr returns the actual listening address. Only valid after ListenAndServe.
@@ -608,10 +626,7 @@ func (wg *WebGateServer) handleInitialize(req *protocol.JSONRPCRequest) *protoco
 				Logging:   &protocol.MCPLoggingCapability{},
 				Resources: &protocol.MCPResourcesCapability{},
 			},
-			ServerInfo: protocol.MCPServerInfo{
-				Name:    "orchestra-web-gate",
-				Version: "1.0.0",
-			},
+			ServerInfo: wg.effectiveServerInfo(),
 		},
 	}
 }
@@ -922,6 +937,8 @@ func (wg *WebGateServer) handleStreaming(ctx context.Context, req *protocol.JSON
 		JSONRPC: "2.0",
 		ID:      req.ID,
 		Result: map[string]any{
+			"stream_id":     streamID,
+			"chunks_sent":   sequence,
 			"content": []map[string]any{
 				{"type": "text", "text": fmt.Sprintf("[streamed %d chunks]", sequence)},
 			},
@@ -1056,9 +1073,18 @@ func wgToolRespToMCP(resp *pluginv1.ToolResponse) protocol.MCPToolResult {
 		}
 	}
 	text := wgExtractResultText(resp.GetResult())
-	return protocol.MCPToolResult{
+	result := protocol.MCPToolResult{
 		Content: []protocol.MCPContent{{Type: "text", Text: text}},
 	}
+	// Extract _ui metadata for UI-aware WebSocket clients.
+	if s := resp.GetResult(); s != nil {
+		if uiVal, ok := s.GetFields()["_ui"]; ok {
+			if uiStruct := uiVal.GetStructValue(); uiStruct != nil {
+				result.Meta = wgStructToMap(uiStruct)
+			}
+		}
+	}
+	return result
 }
 
 func wgExtractResultText(s *structpb.Struct) string {

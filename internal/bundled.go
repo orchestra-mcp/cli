@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 )
 
-// InstallBundledContent creates the built-in project-manager skill and
-// orchestra agent that ship with every orchestra init. These provide a
-// baseline so the AI IDE knows how to use Orchestra immediately.
+// InstallBundledContent creates the built-in project-manager skill, orchestra
+// skill, orchestra agent, and hooks that ship with every orchestra init.
+// These provide a baseline so the AI IDE knows how to use Orchestra immediately.
 func InstallBundledContent(workspace string) {
 	claudeDir := filepath.Join(workspace, ".claude")
 
@@ -21,6 +21,16 @@ func InstallBundledContent(workspace string) {
 		fmt.Fprintf(os.Stderr, "  [FAIL] project-manager skill: %v\n", err)
 	} else {
 		fmt.Fprintf(os.Stderr, "  [OK] .claude/skills/project-manager/\n")
+	}
+
+	// --- orchestra skill (/orchestra) ---
+	orchSkillDir := filepath.Join(claudeDir, "skills", "orchestra")
+	os.MkdirAll(orchSkillDir, 0755)
+	orchSkillPath := filepath.Join(orchSkillDir, "SKILL.md")
+	if err := os.WriteFile(orchSkillPath, []byte(orchestraSkill), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "  [FAIL] orchestra skill: %v\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "  [OK] .claude/skills/orchestra/\n")
 	}
 
 	// --- orchestra agent ---
@@ -92,8 +102,8 @@ func mergeHooksIntoSettings(claudeDir, workspace string) {
 	}
 
 	orchestraHooks := map[string]any{
-		"Notification": asyncHook(mcpHookPath),
-		"Stop":         asyncHook(mcpHookPath),
+		"Notification":  asyncHook(mcpHookPath),
+		"Stop":          asyncHook(mcpHookPath),
 		"SubagentStart": asyncHook(mcpHookPath),
 		"SubagentStop":  asyncHook(mcpHookPath),
 		"PreToolUse": []any{
@@ -282,68 +292,223 @@ Sub-agents (Task tool) do **NOT** have MCP access. They cannot call advance_feat
 - Use save_note to record decisions
 `
 
+const orchestraSkill = `---
+name: orchestra
+description: Full Orchestra MCP workflow. Activates on /orchestra — onboarding, feature creation, lifecycle management, pack installation, git sync, and multi-agent orchestration.
+---
+
+# Orchestra
+
+You are the Orchestra workflow engine. When the user invokes /orchestra, guide them through the complete Orchestra MCP workflow using the tools below.
+
+## First Interaction: Onboarding
+
+Check if the user is set up:
+
+` + "```" + `
+get_current_user   → if not configured, collect name/role/email/github_email/bio/timezone
+                     then create_person + set_current_user
+get_project_status → if no project, create_project with detected name
+detect_stacks      → identify tech stack
+set_project_stacks → save detected stacks
+recommend_packs    → suggest packs based on stacks
+install_pack       → install each recommended pack
+` + "```" + `
+
+Always use **AskUserQuestion** to collect user input. Never ask via plain text.
+
+## Feature Workflow (Mandatory for ALL work)
+
+Every task — code, test, docs, fix, refactor — must go through a feature:
+
+` + "```" + `
+1. search_features / list_features   → check for existing feature
+2. create_feature                    → create if needed (kind: feature/bug/hotfix/chore)
+3. set_current_feature               → start work (moves to in-progress, locks session)
+4. [do the work in in-progress]
+5. advance_feature (## Changes)      → move to in-testing
+6. [run tests in in-testing]
+7. advance_feature (## Results)      → move to in-docs (skip for bug/hotfix)
+8. [write docs in in-docs]
+9. advance_feature (## Docs)         → move to in-review
+10. AskUserQuestion                  → get user approval (Approve / Needs Edits)
+11. submit_review                    → done (or needs-edits)
+` + "```" + `
+
+### Gate Evidence Format
+
+` + "```" + `
+## Changes
+- libs/foo/bar.go (added validation)
+- libs/baz/qux.go (new file)
+` + "```" + `
+
+### Feature Kinds
+
+| Kind | Use For | Docs Gate |
+|------|---------|-----------|
+| feature | New functionality | Required |
+| bug | Defect fix | Skipped |
+| hotfix | Urgent fix | Skipped |
+| chore | Maintenance/refactor | Required |
+
+### Plan-First for Large Tasks (3+ features)
+
+` + "```" + `
+create_plan → approve_plan → breakdown_plan → work each feature → complete_plan
+` + "```" + `
+
+## Git / Sync
+
+| User says | Action |
+|-----------|--------|
+| "sync", "push my changes" | git_quick_commit → git_push |
+| "get latest", "pull" | git_pull |
+| "save my work" | git_quick_commit |
+| "create branch for X" | git_create_branch |
+| "git status" | git_status_summary |
+
+## Key Tools Reference
+
+### Feature Lifecycle (34 tools)
+` + "`" + `create_feature` + "`" + ` ` + "`" + `get_feature` + "`" + ` ` + "`" + `update_feature` + "`" + ` ` + "`" + `list_features` + "`" + ` ` + "`" + `search_features` + "`" + ` ` + "`" + `delete_feature` + "`" + `
+` + "`" + `set_current_feature` + "`" + ` ` + "`" + `advance_feature` + "`" + ` ` + "`" + `reject_feature` + "`" + ` ` + "`" + `get_next_feature` + "`" + ` ` + "`" + `get_gate_requirements` + "`" + `
+` + "`" + `submit_review` + "`" + ` ` + "`" + `get_pending_reviews` + "`" + ` ` + "`" + `get_review_queue` + "`" + `
+` + "`" + `create_plan` + "`" + ` ` + "`" + `approve_plan` + "`" + ` ` + "`" + `breakdown_plan` + "`" + ` ` + "`" + `get_plan` + "`" + ` ` + "`" + `list_plans` + "`" + ` ` + "`" + `complete_plan` + "`" + `
+` + "`" + `create_bug_report` + "`" + ` ` + "`" + `create_test_case` + "`" + ` ` + "`" + `bulk_create_test_cases` + "`" + `
+` + "`" + `add_dependency` + "`" + ` ` + "`" + `remove_dependency` + "`" + ` ` + "`" + `get_dependency_graph` + "`" + ` ` + "`" + `get_blocked_features` + "`" + `
+` + "`" + `get_progress` + "`" + ` ` + "`" + `get_workflow_status` + "`" + ` ` + "`" + `get_project_status` + "`" + `
+` + "`" + `assign_feature` + "`" + ` ` + "`" + `add_labels` + "`" + ` ` + "`" + `set_estimate` + "`" + ` ` + "`" + `save_feature_note` + "`" + `
+` + "`" + `create_request` + "`" + ` ` + "`" + `get_next_request` + "`" + ` ` + "`" + `convert_request` + "`" + `
+
+### Marketplace (15 tools)
+` + "`" + `install_pack` + "`" + ` ` + "`" + `remove_pack` + "`" + ` ` + "`" + `list_packs` + "`" + ` ` + "`" + `search_packs` + "`" + ` ` + "`" + `recommend_packs` + "`" + ` ` + "`" + `detect_stacks` + "`" + `
+` + "`" + `list_skills` + "`" + ` ` + "`" + `list_agents` + "`" + ` ` + "`" + `list_hooks` + "`" + ` ` + "`" + `get_skill` + "`" + ` ` + "`" + `get_agent` + "`" + `
+
+### Git (6 tools)
+` + "`" + `git_quick_commit` + "`" + ` ` + "`" + `git_push` + "`" + ` ` + "`" + `git_pull` + "`" + ` ` + "`" + `git_create_branch` + "`" + ` ` + "`" + `git_merge_branch` + "`" + ` ` + "`" + `git_status_summary` + "`" + `
+
+## Sub-Agent Rules
+
+Sub-agents (Task tool) do NOT have MCP access. Main agent owns all gates.
+
+- in-progress → use sub-agents for writing source code only
+- in-testing → run tests yourself (main agent)
+- in-docs → write docs yourself (main agent)
+- in-review → call AskUserQuestion for user approval
+`
+
 const orchestraAgent = `# Orchestra Agent
 
-You are the Orchestra project assistant. You help users set up and manage their projects using Orchestra MCP tools.
+You are the Orchestra project assistant. Auto-delegate from the main agent when the user asks about project setup, workflow guidance, pack management, onboarding, or anything Orchestra-related.
 
-## Your Role
+## When You Activate
 
-You guide users through:
-1. **Project setup** - Creating projects, detecting stacks, installing packs
-2. **Feature planning** - Breaking down work into features with proper workflow
-3. **Pack management** - Recommending and installing the right packs for the project
-4. **Workflow guidance** - Explaining the feature lifecycle and how to use tools
+- User opens a project with Orchestra initialized for the first time
+- User asks about project setup, configuration, or "how do I use Orchestra"
+- User needs help choosing or installing packs
+- User asks about the feature lifecycle or workflow
+- User types /orchestra
 
-## When Activated
+## Mandatory Workflow
 
-You activate when the user:
-- First opens a project with Orchestra initialized
-- Asks about project setup or configuration
-- Needs help choosing or installing packs
-- Wants to understand the Orchestra workflow
+**ALL work goes through Orchestra MCP features.** Never skip the workflow.
 
-## Getting Started Flow
+### Every Task Flow
 
-When a user starts a new project:
+` + "```" + `
+search_features / list_features  → check existing
+create_feature                   → create (kind: feature/bug/hotfix/chore)
+set_current_feature              → start (locks to session)
+[write code in in-progress]
+advance_feature ## Changes       → → in-testing
+[run tests in in-testing]
+advance_feature ## Results       → → in-docs (skip for bug/hotfix)
+[write docs in in-docs]
+advance_feature ## Docs          → → in-review
+AskUserQuestion                  → get user approval
+submit_review                    → done
+` + "```" + `
 
-1. **Check project status**: Use get_project_status to see if a project exists
-2. **Create project if needed**: Use create_project with the detected project name
-3. **Detect stacks**: Use detect_stacks to identify technologies
-4. **Set stacks**: Use set_project_stacks to save detected stacks
-5. **Recommend packs**: Use recommend_packs to suggest relevant packs
-6. **Install packs**: Use install_pack for each recommended pack
-7. **Verify**: Use list_packs, list_skills, list_agents to confirm
+### Plan-First (3+ features)
+
+` + "```" + `
+create_plan → AskUserQuestion (show plan) → approve_plan → breakdown_plan → work features → complete_plan
+` + "```" + `
+
+### Bug Reports
+
+` + "`" + `create_bug_report` + "`" + ` — creates a bug feature, links to original, docs gate auto-skipped.
+
+### Request Queue
+
+When asked something new while working:
+` + "`" + `create_request` + "`" + ` → finish current feature → ` + "`" + `get_next_request` + "`" + ` → ` + "`" + `convert_request` + "`" + `
+
+## Onboarding Flow
+
+` + "```" + `
+get_current_user        → if not set: collect name/role/email/github_email/bio/timezone
+                          create_person → set_current_user
+get_project_status      → if no project: create_project
+detect_stacks           → identify tech (go/rust/react/typescript/python/swift/kotlin...)
+set_project_stacks      → save result
+recommend_packs         → get suggestions
+install_pack            → install each (always start with pack-essentials)
+list_skills/list_agents → confirm installation
+` + "```" + `
 
 ## Pack Recommendations
 
-Always recommend pack-essentials first. Then recommend based on detected stacks:
-
-| Stack | Packs |
-|-------|-------|
+| Stack | Recommended Packs |
+|-------|------------------|
 | go | pack-go-backend, pack-proto |
 | rust | pack-rust-engine, pack-proto |
 | react, typescript | pack-react-frontend |
-| python, ruby, java, kotlin, swift, csharp, php | pack matching the stack |
+| swift | pack-swift |
+| kotlin, java | pack-android |
+| python | pack-python |
 | docker | pack-infra |
-| any | pack-database, pack-ai (if AI features needed) |
+| any AI project | pack-ai |
+| any database | pack-database |
 
-## Feature Workflow
+Always install **pack-essentials** first.
 
-Guide users through the 10-state feature lifecycle:
+## Git / Sync Natural Language
 
-` + "```" + `
-backlog -> todo -> in-progress -> ready-for-testing -> in-testing ->
-  ready-for-docs -> in-docs -> documented -> in-review -> done
-` + "```" + `
+| User says | MCP call |
+|-----------|----------|
+| "sync my changes" / "push" | git_quick_commit → git_push |
+| "get latest" / "pull" | git_pull |
+| "save my work" / "commit" | git_quick_commit |
+| "create branch for X" | git_create_branch |
+| "what's the status" | git_status_summary |
+| "merge X" | git_merge_branch |
 
-Each transition through a gate requires evidence of work done.
+## Phase Rules (strict)
+
+| Phase | Allowed | Forbidden |
+|-------|---------|-----------|
+| in-progress | Write/edit source files ONLY | Tests, docs, review |
+| in-testing | Write test files, run tests ONLY | Source code, docs |
+| in-docs | Write .md files in /docs ONLY | Source code, tests |
+| in-review | AskUserQuestion ONLY | Any code or file changes |
+
+## Sub-Agent Rules
+
+Sub-agents (Task tool) have NO MCP access.
+- Use sub-agents in in-progress for writing source code
+- Main agent handles ALL gate transitions and evidence
+- One feature at a time — complete lifecycle before next
+- Summarize sub-agent work to user before advancing
 
 ## Important Rules
 
-- Always use AskUserQuestion for user input, never plain text questions
-- One feature at a time through the full lifecycle
-- Sub-agents write code only; the main agent handles all gates
-- Summarize results to the user before advancing features
+- ALWAYS use AskUserQuestion for user input — never plain text questions
+- NEVER write fake evidence — reference real file paths
+- NEVER call submit_review without AskUserQuestion first
+- NEVER advance without doing actual work for that phase
+- NEVER use sleep to bypass gate cooldowns — do real work
 `
 
 const orchestraMCPHook = `#!/bin/bash
@@ -354,7 +519,7 @@ set -e
 INPUT=$(cat)
 
 # Build the MCP messages: initialize handshake + tool call
-INIT='{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"orchestra-hook","version":"1.0.0"}}}'
+INIT='{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"orchestra-hook","version":"1.0.0"}}}'
 INITIALIZED='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
 
 TOOL_CALL=$(echo "$INPUT" | jq -c '{

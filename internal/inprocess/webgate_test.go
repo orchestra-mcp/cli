@@ -650,6 +650,257 @@ func TestWebGateExternalPluginContextNotCanceled(t *testing.T) {
 	}
 }
 
+// --- Streaming tool call ---
+
+// testRouterWithStreaming adds a streaming tool to testRouter for use in
+// streaming tests.
+func testRouterWithStreaming() *Router {
+	r := testRouter()
+
+	schema, _ := structpb.NewStruct(map[string]any{
+		"type":     "object",
+		"required": []any{"count"},
+		"properties": map[string]any{
+			"count": map[string]any{"type": "integer"},
+		},
+	})
+
+	builder := plugin.New("test-stream-plugin")
+	builder.RegisterStreamingTool("count_chunks", "Emit N text chunks", schema,
+		func(ctx context.Context, req *pluginv1.StreamStart, chunks chan<- []byte) error {
+			n := 3
+			if req.Arguments != nil {
+				if v, ok := req.Arguments.GetFields()["count"]; ok {
+					n = int(v.GetNumberValue())
+				}
+			}
+			for i := 0; i < n; i++ {
+				data, _ := json.Marshal(map[string]any{
+					"type": "text_chunk",
+					"text": fmt.Sprintf("chunk-%d", i),
+				})
+				select {
+				case chunks <- data:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return nil
+		},
+	)
+
+	ep := builder.Export()
+	r.RegisterPlugin(ep)
+	return r
+}
+
+// wgStreamTestServer creates an httptest.Server with a router that has
+// a streaming tool registered.
+func wgStreamTestServer(t *testing.T) (*httptest.Server, *WebGateServer) {
+	t.Helper()
+	router := testRouterWithStreaming()
+	wg := NewWebGateServer(router, "", "", "", nil)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /ws", wg.handleUpgrade)
+
+	ts := httptest.NewServer(wg.corsMiddleware(mux))
+	t.Cleanup(ts.Close)
+	return ts, wg
+}
+
+// TestWebGateStreamingChunksArriveBefore verifies that streaming chunk
+// notifications (method=notifications/stream_chunk) are sent BEFORE the final
+// JSON-RPC response for the streaming tool call.
+//
+// This is the core invariant that the Flutter client relies on: it must
+// subscribe to notifications before initiating the streaming call, buffer
+// chunks, then apply them after the final response resolves.
+func TestWebGateStreamingChunksArriveBefore(t *testing.T) {
+	ts, _ := wgStreamTestServer(t)
+	conn := dialWS(t, wsURL(ts, "/ws"))
+
+	// Send streaming tool call with streaming=true.
+	const reqID = 100
+	if err := conn.WriteJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      reqID,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "count_chunks",
+			"arguments": map[string]any{"count": 3},
+			"streaming": true,
+		},
+	}); err != nil {
+		t.Fatalf("write streaming request: %v", err)
+	}
+
+	// Read all messages until we get the final response (has id=reqID).
+	var chunks []map[string]any
+	var finalResp protocol.JSONRPCResponse
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		conn.SetReadDeadline(deadline)
+		var msg json.RawMessage
+		_, msgBytes, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read message: %v", err)
+		}
+		msg = msgBytes
+
+		var parsed map[string]any
+		if err := json.Unmarshal(msg, &parsed); err != nil {
+			t.Fatalf("parse message: %v", err)
+		}
+
+		// Check if this is the final response (has matching id).
+		if id, ok := parsed["id"]; ok && id != nil {
+			switch v := id.(type) {
+			case float64:
+				if int(v) == reqID {
+					json.Unmarshal(msg, &finalResp)
+					break
+				}
+			}
+			if finalResp.JSONRPC != "" {
+				break
+			}
+		}
+
+		// Collect chunk notifications.
+		if method, ok := parsed["method"].(string); ok && method == "notifications/stream_chunk" {
+			chunks = append(chunks, parsed)
+		}
+	}
+
+	// All 3 chunks must have arrived before the final response.
+	if len(chunks) != 3 {
+		t.Errorf("expected 3 stream chunks, got %d", len(chunks))
+	}
+
+	// Verify chunk structure.
+	for i, chunk := range chunks {
+		params, ok := chunk["params"].(map[string]any)
+		if !ok {
+			t.Errorf("chunk %d: missing params", i)
+			continue
+		}
+		streamID, ok := params["stream_id"].(string)
+		if !ok || streamID == "" {
+			t.Errorf("chunk %d: missing stream_id", i)
+		}
+		if !strings.HasPrefix(streamID, "gate-st-") {
+			t.Errorf("chunk %d: stream_id %q should start with 'gate-st-'", i, streamID)
+		}
+		data, ok := params["data"].(string)
+		if !ok || data == "" {
+			t.Errorf("chunk %d: missing data", i)
+		}
+		// Data should be JSON ChatEvent with type=text_chunk.
+		var event map[string]any
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			t.Errorf("chunk %d: data is not JSON: %v", i, err)
+		} else if event["type"] != "text_chunk" {
+			t.Errorf("chunk %d: event type %q, want text_chunk", i, event["type"])
+		}
+	}
+
+	// Verify final response includes stream_id and chunks_sent.
+	if finalResp.JSONRPC == "" {
+		t.Fatal("no final response received")
+	}
+	if finalResp.Error != nil {
+		t.Fatalf("unexpected error in final response: %+v", finalResp.Error)
+	}
+	resultBytes, _ := json.Marshal(finalResp.Result)
+	var result map[string]any
+	json.Unmarshal(resultBytes, &result)
+	if _, ok := result["stream_id"]; !ok {
+		t.Error("final response missing stream_id field")
+	}
+	if chunksSent, ok := result["chunks_sent"]; !ok || chunksSent == nil {
+		t.Error("final response missing chunks_sent field")
+	}
+}
+
+// TestWebGateStreamingFallsThrough verifies that a streaming=true request for
+// a non-streaming tool falls through to the regular tool call handler.
+func TestWebGateStreamingFallsThrough(t *testing.T) {
+	ts, _ := wgStreamTestServer(t)
+	conn := dialWS(t, wsURL(ts, "/ws"))
+
+	// list_features is a regular (non-streaming) tool.
+	resp := sendJSONRPC(t, conn, "tools/call", 200, map[string]any{
+		"name":      "list_features",
+		"streaming": true,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	resultBytes, _ := json.Marshal(resp.Result)
+	var result protocol.MCPToolResult
+	json.Unmarshal(resultBytes, &result)
+	if result.IsError {
+		t.Errorf("expected IsError=false for fallthrough to regular tool")
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "features listed") {
+		t.Errorf("unexpected content: %+v", result.Content)
+	}
+}
+
+// TestWebGateStreamingStreamID verifies the stream_id in chunk notifications
+// matches the gate-st-{requestID} format.
+func TestWebGateStreamingStreamIDFormat(t *testing.T) {
+	ts, _ := wgStreamTestServer(t)
+	conn := dialWS(t, wsURL(ts, "/ws"))
+
+	const reqID = 42
+	if err := conn.WriteJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      reqID,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "count_chunks",
+			"arguments": map[string]any{"count": 1},
+			"streaming": true,
+		},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	expectedStreamID := fmt.Sprintf("gate-st-%d", reqID)
+	deadline := time.Now().Add(5 * time.Second)
+	foundChunk := false
+
+	for time.Now().Before(deadline) {
+		conn.SetReadDeadline(deadline)
+		var parsed map[string]any
+		if err := conn.ReadJSON(&parsed); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+
+		if method, _ := parsed["method"].(string); method == "notifications/stream_chunk" {
+			params, _ := parsed["params"].(map[string]any)
+			if params != nil {
+				if sid, _ := params["stream_id"].(string); sid == expectedStreamID {
+					foundChunk = true
+				}
+			}
+		}
+
+		// Stop after seeing the final response.
+		if id, _ := parsed["id"].(float64); int(id) == reqID {
+			break
+		}
+	}
+
+	if !foundChunk {
+		t.Errorf("expected chunk with stream_id=%q, none found", expectedStreamID)
+	}
+}
+
 // --- Notification (no response) ---
 
 func TestWebGateNotification(t *testing.T) {

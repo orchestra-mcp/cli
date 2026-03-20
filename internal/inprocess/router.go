@@ -119,7 +119,8 @@ func NewRouter() *Router {
 	}
 }
 
-// SetStorageHandler sets the storage backend (typically storage-markdown).
+// SetStorageHandler sets the storage backend. Pass a DualStorage for dual-write
+// (both Markdown and SQLite simultaneously).
 func (r *Router) SetStorageHandler(h plugin.StorageHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
