@@ -6,10 +6,10 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/orchestra-mcp/gen-go v1.0.6
 	github.com/orchestra-mcp/plugin-bridge-claude v1.0.6
-	github.com/orchestra-mcp/plugin-devtools-api v1.0.5
+	github.com/orchestra-mcp/plugin-devtools-api v1.0.6
 	github.com/orchestra-mcp/plugin-devtools-database v1.0.6
 	github.com/orchestra-mcp/plugin-devtools-ssh v1.0.6
-	github.com/orchestra-mcp/plugin-health v1.0.5
+	github.com/orchestra-mcp/plugin-health v1.0.6
 	github.com/orchestra-mcp/plugin-storage-markdown v1.0.6
 	github.com/orchestra-mcp/plugin-storage-sqlite v1.0.6
 	github.com/orchestra-mcp/plugin-sync-cloud v1.0.6

@@ -782,6 +782,9 @@ func (r *Router) routeStorageWrite(ctx context.Context, req *pluginv1.StorageWri
 			},
 		}, nil
 	}
+	if resp.GetSuccess() {
+		r.autoPublishStorageEvent(req.GetPath(), "storage_write")
+	}
 	return &pluginv1.PluginResponse{
 		Response: &pluginv1.PluginResponse_StorageWrite{StorageWrite: resp},
 	}, nil
@@ -807,6 +810,9 @@ func (r *Router) routeStorageDelete(ctx context.Context, req *pluginv1.StorageDe
 				StorageDelete: &pluginv1.StorageDeleteResponse{Success: false},
 			},
 		}, nil
+	}
+	if resp.GetSuccess() {
+		r.autoPublishStorageEvent(req.GetPath(), "storage_delete")
 	}
 	return &pluginv1.PluginResponse{
 		Response: &pluginv1.PluginResponse_StorageDelete{StorageDelete: resp},
@@ -1006,20 +1012,24 @@ func (r *Router) findToolDef(toolName string) *pluginv1.ToolDefinition {
 	return nil
 }
 
-// toolTopicMap maps tool name prefixes to event topics for auto-publishing.
+// toolTopicMap maps tool names to event topics for auto-publishing after
+// successful mutating tool calls.
 var toolTopicMap = map[string]string{
-	"create_feature":     "features",
-	"advance_feature":    "features",
-	"update_feature":     "features",
-	"submit_review":      "features",
+	"create_feature":      "features",
+	"advance_feature":     "features",
+	"update_feature":      "features",
+	"submit_review":       "features",
 	"set_current_feature": "features",
-	"reject_feature":     "features",
-	"delete_feature":     "features",
-	"unlock_feature":     "features",
+	"reject_feature":      "features",
+	"delete_feature":      "features",
+	"unlock_feature":      "features",
+	"assign_feature":      "features",
+	"unassign_feature":    "features",
+	"bulk_assign_features": "features",
 
-	"create_project":  "projects",
-	"update_project":  "projects",
-	"delete_project":  "projects",
+	"create_project": "projects",
+	"update_project": "projects",
+	"delete_project": "projects",
 
 	"create_plan":    "plans",
 	"update_plan":    "plans",
@@ -1032,13 +1042,61 @@ var toolTopicMap = map[string]string{
 	"update_note":       "notes",
 	"delete_note":       "notes",
 	"pin_note":          "notes",
+	"tag_note":          "notes",
 	"save_feature_note": "notes",
 
 	"create_person": "persons",
 	"update_person": "persons",
 	"delete_person": "persons",
 
+	"delegate_feature":     "delegations",
+	"respond_delegation":   "delegations",
+
+	"create_request": "requests",
+	"convert_request": "requests",
+	"dismiss_request": "requests",
+
+	"doc_create":   "docs",
+	"doc_update":   "docs",
+	"doc_delete":   "docs",
+	"doc_generate": "docs",
+
+	"create_agent": "agents",
+	"update_agent": "agents",
+	"delete_agent": "agents",
+
+	"create_skill": "skills",
+	"update_skill": "skills",
+	"delete_skill": "skills",
+
+	"create_workflow": "workflows",
+	"update_workflow": "workflows",
+	"delete_workflow": "workflows",
+
+	"create_hook":        "hooks",
+	"update_hook":        "hooks",
+	"delete_hook":        "hooks",
 	"receive_hook_event": "hooks",
+
+	"create_prompt": "prompts",
+	"update_prompt": "prompts",
+	"delete_prompt": "prompts",
+
+	"create_action": "actions",
+	"update_action": "actions",
+	"delete_action": "actions",
+
+	"create_experiment":      "experiments",
+	"update_experiment":      "experiments",
+	"start_experiment":       "experiments",
+	"complete_experiment":    "experiments",
+	"abandon_experiment":     "experiments",
+
+	"create_hypothesis":    "hypotheses",
+	"update_hypothesis":    "hypotheses",
+	"refine_hypothesis":    "hypotheses",
+	"validate_hypothesis":  "hypotheses",
+	"invalidate_hypothesis": "hypotheses",
 }
 
 // autoPublishToolEvent publishes an event to the EventBus after a successful
@@ -1049,4 +1107,34 @@ func (r *Router) autoPublishToolEvent(toolName string, args *structpb.Struct) {
 		return
 	}
 	r.eventBus.Publish(topic, toolName, args, "router")
+}
+
+// storagePathTopicMap maps storage path prefixes to event topics.
+var storagePathTopicMap = [][2]string{
+	{"orchestra-agents/features/", "features"},
+	{"orchestra-agents/plans/", "plans"},
+	{"orchestra-agents/requests/", "requests"},
+	{"orchestra-agents/delegations/", "delegations"},
+	{"orchestra-agents/persons/", "persons"},
+	{".notes/", "notes"},
+	{".projects/", "projects"},
+	{"docs/", "docs"},
+	{"agents/agents/", "agents"},
+	{"agents/workflows/", "workflows"},
+	{".skills/", "skills"},
+	{".hooks/", "hooks"},
+	{".prompts/", "prompts"},
+	{".actions/", "actions"},
+}
+
+// autoPublishStorageEvent publishes an event to the EventBus after a successful
+// storage write or delete. The topic is derived from the storage path prefix.
+func (r *Router) autoPublishStorageEvent(path, eventType string) {
+	for _, entry := range storagePathTopicMap {
+		if strings.Contains(path, entry[0]) {
+			payload, _ := structpb.NewStruct(map[string]any{"path": path})
+			r.eventBus.Publish(entry[1], eventType, payload, "storage")
+			return
+		}
+	}
 }
