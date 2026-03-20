@@ -127,6 +127,10 @@ func (wg *WebGateServer) ListenAndServe(ctx context.Context, addr string) error 
 	// pushes real-time tool/text events to all connected WebSocket clients.
 	wg.StartEventPoller(ctx)
 
+	// Start the data-change broadcaster — subscribes to all EventBus topics
+	// and pushes notifications/data messages to all connected WebSocket clients.
+	wg.StartDataChangeBroadcaster(ctx)
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- wg.server.Serve(ln)
@@ -434,6 +438,51 @@ func (wg *WebGateServer) StartEventPoller(ctx context.Context) {
 				return
 			case <-ticker.C:
 				wg.pollAndPushEvents(ctx)
+			}
+		}
+	}()
+}
+
+// StartDataChangeBroadcaster subscribes to all EventBus topics and broadcasts
+// notifications/data JSON-RPC messages to all connected WebSocket clients
+// whenever data changes (storage writes/deletes or mutating tool calls).
+func (wg *WebGateServer) StartDataChangeBroadcaster(ctx context.Context) {
+	subID, ch := wg.router.EventBus().SubscribeAll()
+	slog.Debug("web-gate data-change broadcaster started")
+	go func() {
+		defer wg.router.EventBus().Unsubscribe(subID)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-ch:
+				if !ok {
+					return
+				}
+				// Don't push if nobody is listening.
+				wg.connsMu.Lock()
+				nConns := len(wg.conns)
+				wg.connsMu.Unlock()
+				if nConns == 0 {
+					continue
+				}
+				params := map[string]any{
+					"topic":      ev.GetTopic(),
+					"event_type": ev.GetEventType(),
+					"source":     ev.GetSourcePlugin(),
+				}
+				if ev.GetTimestamp() != nil {
+					params["timestamp"] = ev.GetTimestamp().AsTime().UTC().Format(time.RFC3339Nano)
+				}
+				if ev.GetPayload() != nil {
+					params["payload"] = ev.GetPayload().AsMap()
+				}
+				slog.Debug("web-gate broadcasting data change",
+					"topic", ev.GetTopic(),
+					"event_type", ev.GetEventType(),
+					"clients", nConns,
+				)
+				wg.broadcast("notifications/data", params)
 			}
 		}
 	}()
