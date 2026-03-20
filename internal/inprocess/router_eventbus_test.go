@@ -246,8 +246,8 @@ func TestRouterSend_StorageWritePublishesEvent(t *testing.T) {
 		RequestId: "req-sw-1",
 		Request: &pluginv1.PluginRequest_StorageWrite{
 			StorageWrite: &pluginv1.StorageWriteRequest{
-				Path: "orchestra-agents/features/FEAT-SW1.md",
-				Body: "# test",
+				Path:    "orchestra-agents/features/FEAT-SW1.md",
+				Content: []byte("# test"),
 			},
 		},
 	})

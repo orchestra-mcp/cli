@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -29,17 +28,11 @@ func wgBroadcastTestServer(t *testing.T) (*httptest.Server, *WebGateServer) {
 	return ts, wg
 }
 
-// dialWS opens a WebSocket connection to the test server and performs MCP initialize.
-func dialWS(t *testing.T, ts *httptest.Server) *websocket.Conn {
+// dialWSBroadcast opens a WebSocket to ts at /ws and performs MCP initialize.
+func dialWSBroadcast(t *testing.T, ts *httptest.Server) *websocket.Conn {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("websocket dial: %v", err)
-	}
-	t.Cleanup(func() { conn.Close() })
-
-	// Send MCP initialize so the connection is registered.
+	conn := dialWS(t, wsURL(ts, "/ws"))
+	// Send MCP initialize so the connection is registered in wg.conns.
 	initMsg := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -53,7 +46,6 @@ func dialWS(t *testing.T, ts *httptest.Server) *websocket.Conn {
 	if err := conn.WriteJSON(initMsg); err != nil {
 		t.Fatalf("write initialize: %v", err)
 	}
-	// Drain the initialize response.
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
 	conn.ReadMessage()                                    //nolint:errcheck
 	conn.SetReadDeadline(time.Time{})                     // reset
@@ -80,7 +72,7 @@ func readNotification(t *testing.T, conn *websocket.Conn, timeout time.Duration)
 // events are forwarded as notifications/data messages to connected WS clients.
 func TestDataChangeBroadcaster_PublishesNotificationsData(t *testing.T) {
 	ts, wg := wgBroadcastTestServer(t)
-	conn := dialWS(t, ts)
+	conn := dialWSBroadcast(t, ts)
 
 	// Publish a features event directly on the EventBus.
 	payload, _ := structpb.NewStruct(map[string]any{"id": "FEAT-ABC"})
@@ -122,7 +114,7 @@ func TestDataChangeBroadcaster_PublishesNotificationsData(t *testing.T) {
 // are all forwarded to connected clients.
 func TestDataChangeBroadcaster_MultipleTopics(t *testing.T) {
 	ts, wg := wgBroadcastTestServer(t)
-	conn := dialWS(t, ts)
+	conn := dialWSBroadcast(t, ts)
 
 	topics := []struct {
 		topic     string
@@ -181,15 +173,15 @@ func TestDataChangeBroadcaster_NoClientsNoBlock(t *testing.T) {
 func TestDataChangeBroadcaster_StorageWriteTriggersNotification(t *testing.T) {
 	ts, wg := wgBroadcastTestServer(t)
 	wg.router.SetStorageHandler(&stubStorageHandler{})
-	conn := dialWS(t, ts)
+	conn := dialWSBroadcast(t, ts)
 
 	// Trigger a storage write via the router Send() method.
 	_, err := wg.router.Send(wg.ctx, &pluginv1.PluginRequest{
 		RequestId: "req-sw-broadcast",
 		Request: &pluginv1.PluginRequest_StorageWrite{
 			StorageWrite: &pluginv1.StorageWriteRequest{
-				Path: "orchestra-agents/features/FEAT-XYZ.md",
-				Body: "# test feature",
+				Path:    "orchestra-agents/features/FEAT-XYZ.md",
+				Content: []byte("# test feature"),
 			},
 		},
 	})
