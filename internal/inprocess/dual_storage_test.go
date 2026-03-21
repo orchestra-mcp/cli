@@ -33,7 +33,7 @@ func (f *fakeStorage) Write(_ context.Context, req *pluginv1.StorageWriteRequest
 	if f.writeErr != nil {
 		return nil, f.writeErr
 	}
-	return &pluginv1.StorageWriteResponse{Version: f.writeVersion}, nil
+	return &pluginv1.StorageWriteResponse{NewVersion: f.writeVersion}, nil
 }
 
 func (f *fakeStorage) Delete(_ context.Context, req *pluginv1.StorageDeleteRequest) (*pluginv1.StorageDeleteResponse, error) {
@@ -88,8 +88,8 @@ func TestDualStorageWrite_BothCalled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp.Version != 1 {
-		t.Errorf("expected version 1 from primary, got %d", resp.Version)
+	if resp.NewVersion != 1 {
+		t.Errorf("expected version 1 from primary, got %d", resp.NewVersion)
 	}
 	if primary.writeCalled != 1 {
 		t.Errorf("primary.Write called %d times, want 1", primary.writeCalled)
@@ -136,8 +136,8 @@ func TestDualStorageWrite_MirrorFailureNonFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error despite mirror failure, got: %v", err)
 	}
-	if resp.Version != 2 {
-		t.Errorf("expected primary version 2, got %d", resp.Version)
+	if resp.NewVersion != 2 {
+		t.Errorf("expected primary version 2, got %d", resp.NewVersion)
 	}
 }
 
